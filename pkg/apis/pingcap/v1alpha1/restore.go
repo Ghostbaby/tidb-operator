@@ -16,6 +16,7 @@ package v1alpha1
 import (
 	"fmt"
 
+	"github.com/pingcap/tidb-operator/pkg/label"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -25,9 +26,24 @@ func (rs *Restore) GetRestoreJobName() string {
 	return fmt.Sprintf("restore-%s", rs.GetName())
 }
 
+// GetInstanceName return the backup instance name
+func (rs *Restore) GetInstanceName() string {
+	if rs.Labels != nil {
+		if v, ok := rs.Labels[label.InstanceLabelKey]; ok {
+			return v
+		}
+	}
+	return rs.Name
+}
+
+// GetTidbEndpointHash return the hash string base on tidb cluster's host and port
+func (rs *Restore) GetTidbEndpointHash() string {
+	return HashContents([]byte(rs.Spec.To.GetTidbEndpoint()))
+}
+
 // GetRestorePVCName return the backup pvc name
 func (rs *Restore) GetRestorePVCName() string {
-	return fmt.Sprintf("%s-restore-pvc", rs.Spec.Cluster)
+	return fmt.Sprintf("restore-pvc-%s", rs.GetTidbEndpointHash())
 }
 
 // GetRestoreCondition get the specify type's RestoreCondition from the given RestoreStatus
@@ -69,6 +85,12 @@ func UpdateRestoreCondition(status *RestoreStatus, condition *RestoreCondition) 
 	status.Conditions[conditionIndex] = *condition
 	// Return true if one of the fields have changed.
 	return !isUpdate
+}
+
+// IsRestoreInvalid returns true if a Restore has invalid condition set
+func IsRestoreInvalid(restore *Restore) bool {
+	_, condition := GetRestoreCondition(&restore.Status, RestoreInvalid)
+	return condition != nil && condition.Status == corev1.ConditionTrue
 }
 
 // IsRestoreComplete returns true if a Restore has successfully completed

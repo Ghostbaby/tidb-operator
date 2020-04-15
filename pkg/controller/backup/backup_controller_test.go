@@ -21,6 +21,7 @@ import (
 
 	. "github.com/onsi/gomega"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
+	"github.com/pingcap/tidb-operator/pkg/backup/constants"
 	"github.com/pingcap/tidb-operator/pkg/client/clientset/versioned/fake"
 	informers "github.com/pingcap/tidb-operator/pkg/client/informers/externalversions"
 	corev1 "k8s.io/api/core/v1"
@@ -29,6 +30,7 @@ import (
 	kubeinformers "k8s.io/client-go/informers"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/utils/pointer"
 )
 
 func TestBackupControllerEnqueueBackup(t *testing.T) {
@@ -51,6 +53,7 @@ func TestBackupControllerUpdateBackup(t *testing.T) {
 	type testcase struct {
 		name                   string
 		backupHasBeenDeleted   bool
+		backupIsInvalid        bool
 		backupHasBeenCompleted bool
 		backupHasBeenScheduled bool
 		expectFn               func(*GomegaWithT, *Controller)
@@ -64,6 +67,15 @@ func TestBackupControllerUpdateBackup(t *testing.T) {
 
 		if test.backupHasBeenDeleted {
 			backup.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+		}
+
+		if test.backupIsInvalid {
+			backup.Status.Conditions = []v1alpha1.BackupCondition{
+				{
+					Type:   v1alpha1.BackupInvalid,
+					Status: corev1.ConditionTrue,
+				},
+			}
 		}
 
 		if test.backupHasBeenCompleted {
@@ -94,6 +106,7 @@ func TestBackupControllerUpdateBackup(t *testing.T) {
 		{
 			name:                   "backup has been deleted",
 			backupHasBeenDeleted:   true,
+			backupIsInvalid:        false,
 			backupHasBeenCompleted: false,
 			backupHasBeenScheduled: false,
 			expectFn: func(g *GomegaWithT, bkc *Controller) {
@@ -101,8 +114,19 @@ func TestBackupControllerUpdateBackup(t *testing.T) {
 			},
 		},
 		{
+			name:                   "backup is invalid",
+			backupHasBeenDeleted:   false,
+			backupIsInvalid:        true,
+			backupHasBeenCompleted: false,
+			backupHasBeenScheduled: false,
+			expectFn: func(g *GomegaWithT, bkc *Controller) {
+				g.Expect(bkc.queue.Len()).To(Equal(0))
+			},
+		},
+		{
 			name:                   "backup has been completed",
 			backupHasBeenDeleted:   false,
+			backupIsInvalid:        false,
 			backupHasBeenCompleted: true,
 			backupHasBeenScheduled: false,
 			expectFn: func(g *GomegaWithT, bkc *Controller) {
@@ -112,6 +136,7 @@ func TestBackupControllerUpdateBackup(t *testing.T) {
 		{
 			name:                   "backup has been scheduled",
 			backupHasBeenDeleted:   false,
+			backupIsInvalid:        false,
 			backupHasBeenCompleted: false,
 			backupHasBeenScheduled: true,
 			expectFn: func(g *GomegaWithT, bkc *Controller) {
@@ -121,6 +146,7 @@ func TestBackupControllerUpdateBackup(t *testing.T) {
 		{
 			name:                   "backup is newly created",
 			backupHasBeenDeleted:   false,
+			backupIsInvalid:        false,
 			backupHasBeenCompleted: false,
 			backupHasBeenScheduled: false,
 			expectFn: func(g *GomegaWithT, bkc *Controller) {
@@ -246,16 +272,22 @@ func newBackup() *v1alpha1.Backup {
 			UID:       types.UID("test-bk"),
 		},
 		Spec: v1alpha1.BackupSpec{
-			Cluster:        "demo1",
-			TidbSecretName: "demo1-tidb-secret",
-			StorageType:    v1alpha1.BackupStorageTypeS3,
+			From: v1alpha1.TiDBAccessConfig{
+				Host:       "10.1.1.2",
+				Port:       constants.DefaultTidbPort,
+				User:       constants.DefaultTidbUser,
+				SecretName: "demo1-tidb-secret",
+			},
 			StorageProvider: v1alpha1.StorageProvider{
 				S3: &v1alpha1.S3StorageProvider{
 					Provider:   v1alpha1.S3StorageProviderTypeCeph,
 					Endpoint:   "http://10.0.0.1",
+					Bucket:     "test1-demo1",
 					SecretName: "demo",
 				},
 			},
+			StorageClassName: pointer.StringPtr("local-storage"),
+			StorageSize:      "1Gi",
 		},
 	}
 }

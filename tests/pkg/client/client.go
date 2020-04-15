@@ -1,3 +1,16 @@
+// Copyright 2019 PingCAP, Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package client
 
 import (
@@ -6,16 +19,17 @@ import (
 	"os"
 	"time"
 
-	exampleagg "github.com/pingcap/tidb-operator/tests/pkg/apiserver/client/clientset/versioned"
-	"github.com/pingcap/tidb-operator/tests/slack"
-
 	"github.com/juju/errors"
 	asclientset "github.com/pingcap/advanced-statefulset/pkg/client/clientset/versioned"
 	"github.com/pingcap/tidb-operator/pkg/client/clientset/versioned"
 	"github.com/pingcap/tidb-operator/pkg/client/clientset/versioned/typed/pingcap/v1alpha1"
+	exampleagg "github.com/pingcap/tidb-operator/tests/pkg/apiserver/client/clientset/versioned"
+	"github.com/pingcap/tidb-operator/tests/slack"
+	apiextensionsclientset "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	aggregatorclientset "k8s.io/kube-aggregator/pkg/client/clientset_generated/clientset"
 )
 
 var (
@@ -31,7 +45,7 @@ func RegisterFlags() {
 			"Only required if out-of-cluster.")
 }
 
-func NewCliOrDie() (versioned.Interface, kubernetes.Interface, asclientset.Interface) {
+func NewCliOrDie() (versioned.Interface, kubernetes.Interface, asclientset.Interface, aggregatorclientset.Interface, apiextensionsclientset.Interface) {
 	cfg, err := GetConfig()
 	if err != nil {
 		slack.NotifyAndPanic(err)
@@ -118,7 +132,7 @@ func LoadConfig() (*rest.Config, error) {
 	return cfg, errors.Trace(err)
 }
 
-func buildClientsOrDie(cfg *rest.Config) (versioned.Interface, kubernetes.Interface, asclientset.Interface) {
+func buildClientsOrDie(cfg *rest.Config) (versioned.Interface, kubernetes.Interface, asclientset.Interface, aggregatorclientset.Interface, apiextensionsclientset.Interface) {
 	cfg.Timeout = 30 * time.Second
 	cli, err := versioned.NewForConfig(cfg)
 	if err != nil {
@@ -135,5 +149,15 @@ func buildClientsOrDie(cfg *rest.Config) (versioned.Interface, kubernetes.Interf
 		slack.NotifyAndPanic(err)
 	}
 
-	return cli, kubeCli, asCli
+	aggrCli, err := aggregatorclientset.NewForConfig(cfg)
+	if err != nil {
+		slack.NotifyAndPanic(err)
+	}
+
+	apiExtCli, err := apiextensionsclientset.NewForConfig(cfg)
+	if err != nil {
+		slack.NotifyAndPanic(err)
+	}
+
+	return cli, kubeCli, asCli, aggrCli, apiExtCli
 }

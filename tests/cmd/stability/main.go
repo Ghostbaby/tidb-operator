@@ -9,7 +9,7 @@
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // See the License for the specific language governing permissions and
-// limitations under the License.package spec
+// limitations under the License.
 
 package main
 
@@ -31,7 +31,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/component-base/logs"
-	glog "k8s.io/klog"
+	"k8s.io/klog"
 )
 
 var cfg *tests.Config
@@ -46,7 +46,7 @@ func main() {
 	logs.InitLogs()
 	defer logs.FlushLogs()
 	go func() {
-		glog.Info(http.ListenAndServe(":6060", nil))
+		klog.Info(http.ListenAndServe(":6060", nil))
 	}()
 	metrics.StartServer()
 	cfg = tests.ParseConfigOrDie()
@@ -73,7 +73,7 @@ func main() {
 }
 
 func run() {
-	cli, kubeCli, asCli := client.NewCliOrDie()
+	cli, kubeCli, asCli, aggrCli, apiExtCli := client.NewCliOrDie()
 
 	ocfg := newOperatorConfig()
 
@@ -115,7 +115,7 @@ func run() {
 	fta := tests.NewFaultTriggerAction(cli, kubeCli, cfg)
 	fta.CheckAndRecoverEnvOrDie()
 
-	oa := tests.NewOperatorActions(cli, kubeCli, asCli, tests.DefaultPollInterval, cfg, allClusters)
+	oa := tests.NewOperatorActions(cli, kubeCli, asCli, aggrCli, apiExtCli, tests.DefaultPollInterval, ocfg, cfg, allClusters, nil, nil)
 	oa.CheckK8sAvailableOrDie(nil, nil)
 	oa.LabelNodesOrDie()
 
@@ -170,15 +170,14 @@ func run() {
 		}
 
 		// upgrade
-		oa.RegisterWebHookAndServiceOrDie(certCtx, ocfg)
+		namespace := os.Getenv("NAMESPACE")
+		oa.RegisterWebHookAndServiceOrDie(ocfg.WebhookConfigName, namespace, ocfg.WebhookServiceName, certCtx)
 		ctx, cancel := context.WithCancel(context.Background())
 		for _, cluster := range clusters {
-			assignedNodes := oa.GetTidbMemberAssignedNodesOrDie(cluster)
 			cluster.UpgradeAll(upgradeVersion)
 			oa.UpgradeTidbClusterOrDie(cluster)
 			oa.CheckUpgradeOrDie(ctx, cluster)
 			oa.CheckTidbClusterStatusOrDie(cluster)
-			oa.CheckTidbMemberAssignedNodesOrDie(cluster, assignedNodes)
 		}
 
 		// configuration change
@@ -208,7 +207,7 @@ func run() {
 			oa.CheckTidbClusterStatusOrDie(cluster)
 		}
 		cancel()
-		oa.CleanWebHookAndServiceOrDie(ocfg)
+		oa.CleanWebHookAndServiceOrDie(ocfg.WebhookConfigName)
 
 		for _, cluster := range clusters {
 			oa.CheckDisasterToleranceOrDie(cluster)
@@ -242,6 +241,9 @@ func run() {
 
 		// truncate tikv sst file
 		oa.TruncateSSTFileThenCheckFailoverOrDie(clusters[0], 5*time.Minute)
+
+		// delete pd data
+		oa.DeletePDDataThenCheckFailoverOrDie(clusters[0], 5*time.Minute)
 
 		// stop one etcd
 		faultEtcd := tests.SelectNode(cfg.ETCDs)
@@ -377,16 +379,18 @@ func run() {
 	}
 
 	slack.SuccessCount++
-	glog.Infof("################## Stability test finished at: %v\n\n\n\n", time.Now().Format(time.RFC3339))
+	klog.Infof("################## Stability test finished at: %v\n\n\n\n", time.Now().Format(time.RFC3339))
 }
 
 func newOperatorConfig() *tests.OperatorConfig {
 	return &tests.OperatorConfig{
-		Namespace:      "pingcap",
-		ReleaseName:    "operator",
-		Image:          cfg.OperatorImage,
-		Tag:            cfg.OperatorTag,
-		SchedulerImage: "gcr.io/google-containers/hyperkube",
+		Namespace:                 "pingcap",
+		ReleaseName:               "operator",
+		Image:                     cfg.OperatorImage,
+		Tag:                       cfg.OperatorTag,
+		ControllerManagerReplicas: tests.IntPtr(2),
+		SchedulerImage:            "gcr.io/google-containers/hyperkube",
+		SchedulerReplicas:         tests.IntPtr(2),
 		Features: []string{
 			"StableScheduling=true",
 		},
@@ -396,6 +400,9 @@ func newOperatorConfig() *tests.OperatorConfig {
 		WebhookConfigName:  "webhook-config",
 		ImagePullPolicy:    v1.PullAlways,
 		TestMode:           true,
+		WebhookEnabled:     true,
+		PodWebhookEnabled:  false,
+		StsWebhookEnabled:  true,
 	}
 }
 
@@ -409,6 +416,7 @@ func newTidbClusterConfig(ns, clusterName string) *tests.TidbClusterConfig {
 		PDImage:          fmt.Sprintf("pingcap/pd:%s", tidbVersion),
 		TiKVImage:        fmt.Sprintf("pingcap/tikv:%s", tidbVersion),
 		TiDBImage:        fmt.Sprintf("pingcap/tidb:%s", tidbVersion),
+		PumpImage:        fmt.Sprintf("pingcap/tidb-binlog:%s", tidbVersion),
 		StorageClassName: "local-storage",
 		UserName:         "root",
 		Password:         "admin",

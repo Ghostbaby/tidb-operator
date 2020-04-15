@@ -15,6 +15,8 @@ package pod
 
 import (
 	"fmt"
+	"testing"
+
 	. "github.com/onsi/gomega"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
@@ -26,9 +28,11 @@ import (
 	admission "k8s.io/api/admission/v1beta1"
 	apps "k8s.io/api/apps/v1"
 	core "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	kubefake "k8s.io/client-go/kubernetes/fake"
-	"testing"
+	k8sTesting "k8s.io/client-go/testing"
 )
 
 var (
@@ -46,34 +50,21 @@ func TestTiKVDeleterDelete(t *testing.T) {
 		isUpgrading    bool
 		storeState     string
 		UpdatePVCErr   bool
+		PVCNotFound    bool
 		expectFn       func(g *GomegaWithT, response *admission.AdmissionResponse)
 	}
 
 	testFn := func(test *testcase) {
 
 		t.Log(test.name)
-
-		pod_0 := newTiKVPod(0)
 		deleteTiKVPod := newTiKVPod(1)
-		pod_2 := newTiKVPod(2)
-		pvc_0 := newPVCForTikv(0)
-		pvc_1 := newPVCForTikv(1)
-		pvc_2 := newPVCForTikv(2)
-
 		ownerStatefulSet := newOwnerStatefulsetForTikv()
 		tc := newTidbClusterForPodAdmissionControl()
 		kubeCli := kubefake.NewSimpleClientset()
 
-		podAdmissionControl, fakePVCControl, pvcIndexer, podIndexer, _, _ := newPodAdmissionControl()
+		podAdmissionControl := newPodAdmissionControl(kubeCli)
 		pdControl := pdapi.NewFakePDControl(kubeCli)
 		fakePDClient := controller.NewFakePDClient(pdControl, tc)
-
-		podIndexer.Add(pod_0)
-		podIndexer.Add(deleteTiKVPod)
-		podIndexer.Add(pod_2)
-		pvcIndexer.Add(pvc_0)
-		pvcIndexer.Add(pvc_1)
-		pvcIndexer.Add(pvc_2)
 
 		storesInfo := newTiKVStoresInfo()
 		if test.isUpgrading {
@@ -81,18 +72,31 @@ func TestTiKVDeleterDelete(t *testing.T) {
 			ownerStatefulSet.Status.UpdateRevision = "2"
 		}
 
-		fakePVCControl.SetUpdatePVCError(nil, 0)
-		if test.UpdatePVCErr {
-			fakePVCControl.SetUpdatePVCError(fmt.Errorf("update pvc error"), 0)
-		}
+		fakePDClient.AddReaction(pdapi.GetStoresActionType, func(action *pdapi.Action) (i interface{}, e error) {
+			return storesInfo, nil
+		})
+		fakePDClient.AddReaction(pdapi.DeleteStoreActionType, func(action *pdapi.Action) (i interface{}, e error) {
+			return nil, nil
+		})
+		fakePDClient.AddReaction(pdapi.BeginEvictLeaderActionType, func(action *pdapi.Action) (i interface{}, e error) {
+			return nil, nil
+		})
+		fakePDClient.AddReaction(pdapi.GetStoreActionType, func(action *pdapi.Action) (i interface{}, e error) {
+			return &pdapi.StoreInfo{
+				Store: &pdapi.MetaStore{
+					Store: &metapb.Store{
+						Id: action.ID,
+					},
+					StateName: test.storeState,
+				},
+			}, nil
+		})
 
 		if test.isOutOfOrdinal {
 			pod_3 := newTiKVPod(3)
-			pvc_3 := newPVCForTikv(3)
-			podIndexer.Add(pod_3)
-			pvcIndexer.Add(pvc_3)
 			deleteTiKVPod = pod_3
 			if test.isStoreExist {
+
 				tc.Status.TiKV.Stores["3"] = v1alpha1.TiKVStore{
 					PodName:     memberUtils.TikvPodName(tcName, 3),
 					LeaderCount: 1,
@@ -163,15 +167,17 @@ func TestTiKVDeleterDelete(t *testing.T) {
 			}
 		}
 
-		fakePDClient.AddReaction(pdapi.GetStoresActionType, func(action *pdapi.Action) (i interface{}, e error) {
-			return storesInfo, nil
-		})
-		fakePDClient.AddReaction(pdapi.DeleteStoreActionType, func(action *pdapi.Action) (i interface{}, e error) {
-			return nil, nil
-		})
-		fakePDClient.AddReaction(pdapi.BeginEvictLeaderActionType, func(action *pdapi.Action) (i interface{}, e error) {
-			return nil, nil
-		})
+		if test.UpdatePVCErr {
+			if test.PVCNotFound {
+				kubeCli.PrependReactor("get", "persistentvolumeclaims", func(action k8sTesting.Action) (handled bool, ret runtime.Object, err error) {
+					return true, nil, errors.NewNotFound(action.GetResource().GroupResource(), "name")
+				})
+			} else {
+				kubeCli.PrependReactor("get", "persistentvolumeclaims", func(action k8sTesting.Action) (handled bool, ret runtime.Object, err error) {
+					return true, nil, fmt.Errorf("some errors")
+				})
+			}
+		}
 
 		payload := &admitPayload{
 			pod:              deleteTiKVPod,
@@ -190,10 +196,11 @@ func TestTiKVDeleterDelete(t *testing.T) {
 			isStoreExist:   false,
 			isOutOfOrdinal: false,
 			isUpgrading:    false,
-			storeState:     "",
+			storeState:     v1alpha1.TiKVStateDown,
 			UpdatePVCErr:   false,
+			PVCNotFound:    false,
 			expectFn: func(g *GomegaWithT, response *admission.AdmissionResponse) {
-				g.Expect(response.Allowed, true)
+				g.Expect(response.Allowed).Should(Equal(true))
 			},
 		},
 		{
@@ -201,22 +208,35 @@ func TestTiKVDeleterDelete(t *testing.T) {
 			isStoreExist:   false,
 			isOutOfOrdinal: true,
 			isUpgrading:    false,
-			storeState:     "",
+			storeState:     v1alpha1.TiKVStateDown,
 			UpdatePVCErr:   false,
+			PVCNotFound:    false,
 			expectFn: func(g *GomegaWithT, response *admission.AdmissionResponse) {
-				g.Expect(response.Allowed, true)
+				g.Expect(response.Allowed).Should(Equal(false))
 			},
 		},
 		{
-			name:           "no store,out of ordinal",
+			name:           "no store,out of ordinal,update pvc error",
 			isStoreExist:   false,
 			isOutOfOrdinal: true,
 			isUpgrading:    false,
-			storeState:     "",
+			storeState:     v1alpha1.TiKVStateDown,
 			UpdatePVCErr:   true,
+			PVCNotFound:    false,
 			expectFn: func(g *GomegaWithT, response *admission.AdmissionResponse) {
-				g.Expect(response.Allowed, true)
-				g.Expect(response.Result.Message, "update pvc error")
+				g.Expect(response.Allowed).Should(Equal(false))
+			},
+		},
+		{
+			name:           "no store,out of ordinal,update pvc error, pvc not found",
+			isStoreExist:   false,
+			isOutOfOrdinal: true,
+			isUpgrading:    false,
+			storeState:     v1alpha1.TiKVStateDown,
+			UpdatePVCErr:   true,
+			PVCNotFound:    true,
+			expectFn: func(g *GomegaWithT, response *admission.AdmissionResponse) {
+				g.Expect(response.Allowed).Should(Equal(false))
 			},
 		},
 		{
@@ -226,8 +246,9 @@ func TestTiKVDeleterDelete(t *testing.T) {
 			isUpgrading:    true,
 			storeState:     v1alpha1.TiKVStateUp,
 			UpdatePVCErr:   false,
+			PVCNotFound:    false,
 			expectFn: func(g *GomegaWithT, response *admission.AdmissionResponse) {
-				g.Expect(response.Allowed, false)
+				g.Expect(response.Allowed).Should(Equal(false))
 			},
 		},
 		{
@@ -237,8 +258,9 @@ func TestTiKVDeleterDelete(t *testing.T) {
 			isUpgrading:    false,
 			storeState:     v1alpha1.TiKVStateUp,
 			UpdatePVCErr:   false,
+			PVCNotFound:    false,
 			expectFn: func(g *GomegaWithT, response *admission.AdmissionResponse) {
-				g.Expect(response.Allowed, false)
+				g.Expect(response.Allowed).Should(Equal(false))
 			},
 		},
 		{
@@ -248,8 +270,9 @@ func TestTiKVDeleterDelete(t *testing.T) {
 			isUpgrading:    true,
 			storeState:     v1alpha1.TiKVStateTombstone,
 			UpdatePVCErr:   false,
+			PVCNotFound:    false,
 			expectFn: func(g *GomegaWithT, response *admission.AdmissionResponse) {
-				g.Expect(response.Allowed, true)
+				g.Expect(response.Allowed).Should(Equal(true))
 			},
 		},
 	}
@@ -264,6 +287,7 @@ func newTiKVPod(ordinal int32) *core.Pod {
 	pod := core.Pod{}
 	pod.Labels = map[string]string{
 		label.ComponentLabelKey: label.TiKVLabelVal,
+		label.StoreIDLabelKey:   fmt.Sprintf("%d", ordinal),
 	}
 	pod.Name = memberUtils.TikvPodName(tcName, ordinal)
 	pod.Namespace = namespace

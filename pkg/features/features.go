@@ -16,10 +16,13 @@ package features
 import (
 	"flag"
 	"fmt"
+	"sort"
+	"strconv"
 	"strings"
+	"sync"
 
-	utilflags "github.com/pingcap/tidb-operator/pkg/util/flags"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/klog"
 )
 
 var (
@@ -27,6 +30,7 @@ var (
 	defaultFeatures = map[string]bool{
 		StableScheduling:    true,
 		AdvancedStatefulSet: false,
+		AutoScaling:         false,
 	}
 	// DefaultFeatureGate is a shared global FeatureGate.
 	DefaultFeatureGate FeatureGate = NewFeatureGate()
@@ -38,6 +42,9 @@ const (
 
 	// AdvancedStatefulSet controls whether to use AdvancedStatefulSet to manage pods
 	AdvancedStatefulSet string = "AdvancedStatefulSet"
+
+	// AutoScaling controls whether to use TidbClusterAutoScaler to auto scale-in/out pods
+	AutoScaling string = "AutoScaling"
 )
 
 type FeatureGate interface {
@@ -45,14 +52,22 @@ type FeatureGate interface {
 	AddFlag(flagset *flag.FlagSet)
 	// Enabled returns true if the key is enabled.
 	Enabled(key string) bool
+	// Set parses and stores flag gates for known features
+	// from a string like feature1=true,feature2=false,...
+	Set(value string) error
+	// SetFromMap stores flag gates for enabled features from a map[string]bool
+	SetFromMap(m map[string]bool)
 }
 
+var _ flag.Value = &featureGate{}
+
 type featureGate struct {
+	lock            sync.Mutex
 	enabledFeatures map[string]bool
 }
 
 func (f *featureGate) AddFlag(flagset *flag.FlagSet) {
-	flag.Var(utilflags.NewMapStringBool(&f.enabledFeatures), "features", fmt.Sprintf("A set of key={true,false} pairs to enable/disable features, available features: %s", strings.Join(allFeatures.List(), ",")))
+	flag.Var(f, "features", fmt.Sprintf("A set of key={true,false} pairs to enable/disable features, available features: %s", strings.Join(allFeatures.List(), ",")))
 }
 
 func (f *featureGate) Enabled(key string) bool {
@@ -60,6 +75,49 @@ func (f *featureGate) Enabled(key string) bool {
 		return b
 	}
 	return false
+}
+
+// String returns a string containing all enabled feature gates, formatted as "key1=value1,key2=value2,...".
+func (f *featureGate) String() string {
+	pairs := []string{}
+	for k, v := range f.enabledFeatures {
+		pairs = append(pairs, fmt.Sprintf("%s=%t", k, v))
+	}
+	sort.Strings(pairs)
+	return strings.Join(pairs, ",")
+}
+
+func (f *featureGate) Set(value string) error {
+	m := make(map[string]bool)
+	for _, s := range strings.Split(value, ",") {
+		if len(s) == 0 {
+			continue
+		}
+		arr := strings.SplitN(s, "=", 2)
+		k := strings.TrimSpace(arr[0])
+		if len(arr) != 2 {
+			return fmt.Errorf("missing bool value for %s", k)
+		}
+		v := strings.TrimSpace(arr[1])
+		boolValue, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("invalid value of %s=%s, err: %v", k, v, err)
+		}
+		m[k] = boolValue
+	}
+	f.SetFromMap(m)
+	return nil
+}
+
+func (f *featureGate) SetFromMap(m map[string]bool) {
+	f.lock.Lock()
+	defer f.lock.Unlock()
+
+	for k, v := range m {
+		f.enabledFeatures[k] = v
+	}
+
+	klog.V(1).Infof("feature gates: %v", f.enabledFeatures)
 }
 
 func NewFeatureGate() FeatureGate {

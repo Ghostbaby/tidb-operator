@@ -15,12 +15,16 @@ package tidbcluster
 
 import (
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
+	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1/defaulting"
+	v1alpha1validation "github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1/validation"
 	"github.com/pingcap/tidb-operator/pkg/controller"
 	"github.com/pingcap/tidb-operator/pkg/manager"
 	"github.com/pingcap/tidb-operator/pkg/manager/member"
+	v1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	errorutils "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/klog"
 )
 
 // ControlInterface implements the control logic for updating TidbClusters and their children StatefulSets.
@@ -43,6 +47,9 @@ func NewDefaultTidbClusterControl(
 	orphanPodsCleaner member.OrphanPodsCleaner,
 	pvcCleaner member.PVCCleanerInterface,
 	pumpMemberManager manager.Manager,
+	tiflashMemberManager manager.Manager,
+	discoveryManager member.TidbDiscoveryManager,
+	podRestarter member.PodRestarter,
 	recorder record.EventRecorder) ControlInterface {
 	return &defaultTidbClusterControl{
 		tcControl,
@@ -54,6 +61,9 @@ func NewDefaultTidbClusterControl(
 		orphanPodsCleaner,
 		pvcCleaner,
 		pumpMemberManager,
+		tiflashMemberManager,
+		discoveryManager,
+		podRestarter,
 		recorder,
 	}
 }
@@ -68,11 +78,19 @@ type defaultTidbClusterControl struct {
 	orphanPodsCleaner    member.OrphanPodsCleaner
 	pvcCleaner           member.PVCCleanerInterface
 	pumpMemberManager    manager.Manager
+	tiflashMemberManager manager.Manager
+	discoveryManager     member.TidbDiscoveryManager
+	podRestarter         member.PodRestarter
 	recorder             record.EventRecorder
 }
 
 // UpdateStatefulSet executes the core logic loop for a tidbcluster.
 func (tcc *defaultTidbClusterControl) UpdateTidbCluster(tc *v1alpha1.TidbCluster) error {
+	tcc.defaulting(tc)
+	if !tcc.validate(tc) {
+		return nil // fatal error, no need to retry on invalid object
+	}
+
 	var errs []error
 	oldStatus := tc.Status.DeepCopy()
 
@@ -89,6 +107,21 @@ func (tcc *defaultTidbClusterControl) UpdateTidbCluster(tc *v1alpha1.TidbCluster
 	return errorutils.NewAggregate(errs)
 }
 
+func (tcc *defaultTidbClusterControl) validate(tc *v1alpha1.TidbCluster) bool {
+	errs := v1alpha1validation.ValidateTidbCluster(tc)
+	if len(errs) > 0 {
+		aggregatedErr := errs.ToAggregate()
+		klog.Errorf("tidb cluster %s/%s is not valid and must be fixed first, aggregated error: %v", tc.GetNamespace(), tc.GetName(), aggregatedErr)
+		tcc.recorder.Event(tc, v1.EventTypeWarning, "FailedValidation", aggregatedErr.Error())
+		return false
+	}
+	return true
+}
+
+func (tcc *defaultTidbClusterControl) defaulting(tc *v1alpha1.TidbCluster) {
+	defaulting.SetTidbClusterDefault(tc)
+}
+
 func (tcc *defaultTidbClusterControl) updateTidbCluster(tc *v1alpha1.TidbCluster) error {
 	// syncing all PVs managed by operator's reclaim policy to Retain
 	if err := tcc.reclaimPolicyManager.Sync(tc); err != nil {
@@ -97,6 +130,16 @@ func (tcc *defaultTidbClusterControl) updateTidbCluster(tc *v1alpha1.TidbCluster
 
 	// cleaning all orphan pods(pd or tikv which don't have a related PVC) managed by operator
 	if _, err := tcc.orphanPodsCleaner.Clean(tc); err != nil {
+		return err
+	}
+
+	// reconcile TiDB discovery service
+	if err := tcc.discoveryManager.Reconcile(tc); err != nil {
+		return err
+	}
+
+	// sync all the pods which need to be restarted
+	if err := tcc.podRestarter.Sync(tc); err != nil {
 		return err
 	}
 
@@ -137,6 +180,19 @@ func (tcc *defaultTidbClusterControl) updateTidbCluster(tc *v1alpha1.TidbCluster
 	//   - scale out/in the tidb cluster
 	//   - failover the tidb cluster
 	if err := tcc.tidbMemberManager.Sync(tc); err != nil {
+		return err
+	}
+
+	// works that should do to making the tiflash cluster current state match the desired state:
+	//   - waiting for the tidb cluster available
+	//   - create or update tiflash headless service
+	//   - create the tiflash statefulset
+	//   - sync tiflash cluster status from pd to TidbCluster object
+	//   - set scheduler labels to tiflash stores
+	//   - upgrade the tiflash cluster
+	//   - scale out/in the tiflash cluster
+	//   - failover the tiflash cluster
+	if err := tcc.tiflashMemberManager.Sync(tc); err != nil {
 		return err
 	}
 

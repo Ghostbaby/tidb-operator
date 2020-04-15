@@ -1,4 +1,4 @@
-// Copyright 2019. PingCAP, Inc.
+// Copyright 2019 PingCAP, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -123,7 +123,7 @@ func NewCommandStartServer(builders []*builders.APIGroupBuilder, stopCh <-chan s
 	klog.InitFlags(klogFlags)
 	flags.AddGoFlagSet(klogFlags)
 
-	// Sync the glog and klog flags.
+	// Sync the klog and klog flags.
 	klogFlags.VisitAll(func(f *flag.Flag) {
 		goFlag := flag.CommandLine.Lookup(f.Name)
 		if goFlag != nil {

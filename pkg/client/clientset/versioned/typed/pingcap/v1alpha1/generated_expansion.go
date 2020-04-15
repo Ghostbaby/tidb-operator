@@ -1,4 +1,4 @@
-// Copyright 2019. PingCAP, Inc.
+// Copyright PingCAP, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -24,3 +24,9 @@ type DataResourceExpansion interface{}
 type RestoreExpansion interface{}
 
 type TidbClusterExpansion interface{}
+
+type TidbClusterAutoScalerExpansion interface{}
+
+type TidbInitializerExpansion interface{}
+
+type TidbMonitorExpansion interface{}

@@ -1,4 +1,4 @@
-// Copyright 2019. PingCAP, Inc.
+// Copyright 2019 PingCAP, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -567,7 +567,7 @@ func (c *E2eContext) Setup() {
 					Containers: []v1.Container{{
 						Name: secretName,
 						Command: []string{
-							"/usr/local/bin/tidb-apiserver",
+							"/usr/local/bin/apiserver",
 							"--tls-cert-file=/apiserver.local.config/certificates/tls.crt",
 							"--tls-private-key-file=/apiserver.local.config/certificates/tls.key",
 						},

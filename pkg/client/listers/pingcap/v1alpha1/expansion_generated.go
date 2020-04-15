@@ -1,4 +1,4 @@
-// Copyright 2019. PingCAP, Inc.
+// Copyright PingCAP, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -54,3 +54,27 @@ type TidbClusterListerExpansion interface{}
 // TidbClusterNamespaceListerExpansion allows custom methods to be added to
 // TidbClusterNamespaceLister.
 type TidbClusterNamespaceListerExpansion interface{}
+
+// TidbClusterAutoScalerListerExpansion allows custom methods to be added to
+// TidbClusterAutoScalerLister.
+type TidbClusterAutoScalerListerExpansion interface{}
+
+// TidbClusterAutoScalerNamespaceListerExpansion allows custom methods to be added to
+// TidbClusterAutoScalerNamespaceLister.
+type TidbClusterAutoScalerNamespaceListerExpansion interface{}
+
+// TidbInitializerListerExpansion allows custom methods to be added to
+// TidbInitializerLister.
+type TidbInitializerListerExpansion interface{}
+
+// TidbInitializerNamespaceListerExpansion allows custom methods to be added to
+// TidbInitializerNamespaceLister.
+type TidbInitializerNamespaceListerExpansion interface{}
+
+// TidbMonitorListerExpansion allows custom methods to be added to
+// TidbMonitorLister.
+type TidbMonitorListerExpansion interface{}
+
+// TidbMonitorNamespaceListerExpansion allows custom methods to be added to
+// TidbMonitorNamespaceLister.
+type TidbMonitorNamespaceListerExpansion interface{}

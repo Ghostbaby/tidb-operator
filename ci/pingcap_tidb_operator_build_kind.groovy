@@ -8,14 +8,28 @@ import groovy.transform.Field
 def podYAML = '''
 apiVersion: v1
 kind: Pod
+metadata:
+  labels:
+    app: tidb-operator-e2e
 spec:
   containers:
   - name: main
-    image: gcr.io/k8s-testimages/kubekins-e2e:v20191108-9467d02-master
+    image: gcr.io/k8s-testimages/kubekins-e2e:v20200311-1e25827-master
     command:
     - runner.sh
-    - sleep
-    - 99d
+    # Clean containers on TERM signal in root process to avoid cgroup leaking.
+    # https://github.com/pingcap/tidb-operator/issues/1603#issuecomment-582402196
+    - exec
+    - bash
+    - -c
+    - |
+      function clean() {
+        echo "info: clean all containers to avoid cgroup leaking"
+        docker kill $(docker ps -q) || true
+        docker system prune -af || true
+      }
+      trap clean TERM
+      sleep 1d & wait
     # we need privileged mode in order to do docker in docker
     securityContext:
       privileged: true
@@ -26,6 +40,11 @@ spec:
       requests:
         memory: "8000Mi"
         cpu: 8000m
+        ephemeral-storage: "50Gi"
+      limits:
+        memory: "8000Mi"
+        cpu: 8000m
+        ephemeral-storage: "50Gi"
     # kind needs /lib/modules and cgroups from the host
     volumeMounts:
     - mountPath: /lib/modules
@@ -52,34 +71,68 @@ spec:
     emptyDir: {}
   - name: docker-graph
     emptyDir: {}
+  tolerations:
+  - effect: NoSchedule
+    key: tidb-operator
+    operator: Exists
+  affinity:
+    # running on nodes for tidb-operator only
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchExpressions:
+          - key: ci.pingcap.com
+            operator: In
+            values:
+            - tidb-operator
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchExpressions:
+            - key: app
+              operator: In
+              values:
+              - tidb-operator-e2e
+          topologyKey: kubernetes.io/hostname
 '''
 
-def build(SHELL_CODE) {
+def build(SHELL_CODE, ARTIFACTS = "") {
 	podTemplate(yaml: podYAML) {
 		node(POD_LABEL) {
 			container('main') {
 				def WORKSPACE = pwd()
-				dir("${WORKSPACE}/go/src/github.com/pingcap/tidb-operator") {
-					unstash 'tidb-operator'
-					stage("Debug Info") {
-						println "debug host: 172.16.5.5"
-						println "debug command: kubectl -n jenkins-ci exec -ti ${NODE_NAME} bash"
-						sh """
-						echo "====== shell env ======"
-						echo "pwd: \$(pwd)"
-						env
-						echo "====== go env ======"
-						go env
-						echo "====== docker version ======"
-						docker version
-						"""
-					}
-					stage('Run') {
-						ansiColor('xterm') {
+				try {
+					dir("${WORKSPACE}/go/src/github.com/pingcap/tidb-operator") {
+						unstash 'tidb-operator'
+						stage("Debug Info") {
+							println "debug host: 172.16.5.5"
+							println "debug command: kubectl -n jenkins-ci exec -ti ${NODE_NAME} bash"
 							sh """
-							export GOPATH=${WORKSPACE}/go
-							${SHELL_CODE}
+							echo "====== shell env ======"
+							echo "pwd: \$(pwd)"
+							env
+							echo "====== go env ======"
+							go env
+							echo "====== docker version ======"
+							docker version
 							"""
+						}
+						stage('Run') {
+							ansiColor('xterm') {
+								sh """
+								export GOPATH=${WORKSPACE}/go
+								${SHELL_CODE}
+								"""
+							}
+						}
+					}
+				} finally {
+					if (ARTIFACTS != "") {
+						dir(ARTIFACTS) {
+							archiveArtifacts artifacts: "**", allowEmptyArchive: true
+							junit testResults: "*.xml", allowEmptyResults: true
 						}
 					}
 				}
@@ -114,6 +167,8 @@ def call(BUILD_BRANCH, CREDENTIALS_ID, CODECOV_CREDENTIALS_ID) {
 			container("golang") {
 				def WORKSPACE = pwd()
 				dir("${PROJECT_DIR}") {
+					deleteDir()
+
 					stage('Checkout') {
 						checkout changelog: false,
 						poll: false,
@@ -136,16 +191,17 @@ def call(BUILD_BRANCH, CREDENTIALS_ID, CODECOV_CREDENTIALS_ID) {
 						}
 					}
 
-					stage("Check") {
-						ansiColor('xterm') {
-							sh """
-							export GOPATH=${WORKSPACE}/go
-							export PATH=${WORKSPACE}/go/bin:\$PATH
-							make check-setup
-							make check
-							"""
-						}
-					}
+					// moved to Github Actions
+					// stage("Check") {
+						// ansiColor('xterm') {
+							// sh """
+							// export GOPATH=${WORKSPACE}/go
+							// export PATH=${WORKSPACE}/go/bin:\$PATH
+							// make check-setup
+							// make check
+							// """
+						// }
+					// }
 
 					stage("Build and Test") {
 						ansiColor('xterm') {
@@ -154,11 +210,19 @@ def call(BUILD_BRANCH, CREDENTIALS_ID, CODECOV_CREDENTIALS_ID) {
 							make e2e-build
 							if [ ${BUILD_BRANCH} == "master" ]
 							then
-								make test GO_COVER=y
+								make test GOFLAGS='-race' GO_COVER=y
 								curl -s https://codecov.io/bash | bash -s - -t ${CODECOV_TOKEN} || echo 'Codecov did not collect coverage reports'
 							else
-								make test
+								make test GOFLAGS='-race'
 							fi
+							"""
+						}
+					}
+
+					stage("Prepare for e2e") {
+						ansiColor('xterm') {
+							sh """
+							hack/prepare-e2e.sh
 							"""
 						}
 					}
@@ -168,36 +232,46 @@ def call(BUILD_BRANCH, CREDENTIALS_ID, CODECOV_CREDENTIALS_ID) {
 			}
 		}
 
-        def builds = [:]
-        builds["E2E v1.12.10"] = {
-			build("IMAGE_TAG=${GITHASH} SKIP_BUILD=y GINKGO_NODES=8 KUBE_VERSION=v1.12.10 make e2e")
-        }
-        builds["E2E v1.16.3"] = {
-			build("IMAGE_TAG=${GITHASH} SKIP_BUILD=y GINKGO_NODES=8 KUBE_VERSION=v1.16.3 make e2e")
-        }
-        builds.failFast = false
-        parallel builds
+		def artifacts = "go/src/github.com/pingcap/tidb-operator/artifacts"
+		// unstable in our IDC, disable temporarily
+		//def MIRRORS = "DOCKER_IO_MIRROR=https://dockerhub.azk8s.cn GCR_IO_MIRROR=https://gcr.azk8s.cn QUAY_IO_MIRROR=https://quay.azk8s.cn"
+		def MIRRORS = "DOCKER_IO_MIRROR=http://172.16.4.143:5000 QUAY_IO_MIRROR=http://172.16.4.143:5001"
+		def builds = [:]
+		builds["E2E v1.12.10"] = {
+			build("${MIRRORS} RUNNER_SUITE_NAME=e2e-v1.12 IMAGE_TAG=${GITHASH} SKIP_BUILD=y GINKGO_NODES=6 KUBE_VERSION=v1.12.10 REPORT_DIR=\$(pwd)/artifacts REPORT_PREFIX=v1.12.10_ ./hack/e2e.sh -- --preload-images --operator-killer", artifacts)
+		}
+		builds["E2E v1.12.10 AdvancedStatefulSet"] = {
+			build("${MIRRORS} RUNNER_SUITE_NAME=e2e-v1.12-advanced-statefulset IMAGE_TAG=${GITHASH} SKIP_BUILD=y GINKGO_NODES=6 KUBE_VERSION=v1.12.10 REPORT_DIR=\$(pwd)/artifacts REPORT_PREFIX=v1.12.10_advanced_statefulset ./hack/e2e.sh -- --preload-images --operator-features AdvancedStatefulSet=true", artifacts)
+		}
+		builds["E2E v1.18.0"] = {
+			build("${MIRRORS} RUNNER_SUITE_NAME=e2e-v1.18 IMAGE_TAG=${GITHASH} SKIP_BUILD=y GINKGO_NODES=6 KUBE_VERSION=v1.18.0 REPORT_DIR=\$(pwd)/artifacts REPORT_PREFIX=v1.18.0_ ./hack/e2e.sh -- -preload-images --operator-killer", artifacts)
+		}
+		builds["E2E v1.12.10 Serial"] = {
+			build("${MIRRORS} RUNNER_SUITE_NAME=e2e-v1.12-serial IMAGE_TAG=${GITHASH} SKIP_BUILD=y KUBE_VERSION=v1.12.10 REPORT_DIR=\$(pwd)/artifacts REPORT_PREFIX=v1.12.10_serial_ ./hack/e2e.sh -- --preload-images --ginkgo.focus='\\[Serial\\]' --install-operator=false", artifacts)
+		}
+		builds.failFast = false
+		parallel builds
 
-		// we requires ~/bin/config.cfg, filemgr-linux64 utilities on k8s-kind node
-		// TODO make it possible to run on any node
-		node('k8s-kind') {
-			dir("${PROJECT_DIR}"){
-				deleteDir()
-				unstash 'tidb-operator'
-				if ( !(BUILD_BRANCH ==~ /[a-z0-9]{40}/) ) {
-					stage('upload tidb-operator binary and charts'){
-						//upload binary and charts
-						sh """
-						cp ~/bin/config.cfg ./
-						tar -zcvf tidb-operator.tar.gz images/tidb-operator charts
-						filemgr-linux64 --action mput --bucket pingcap-dev --nobar --key builds/pingcap/operator/${GITHASH}/centos7/tidb-operator.tar.gz --file tidb-operator.tar.gz
-						"""
-						//update refs
-						writeFile file: 'sha1', text: "${GITHASH}"
-						sh """
-						filemgr-linux64 --action mput --bucket pingcap-dev --nobar --key refs/pingcap/operator/${BUILD_BRANCH}/centos7/sha1 --file sha1
-						rm -f sha1 tidb-operator.tar.gz config.cfg
-						"""
+		if ( !(BUILD_BRANCH ==~ /[a-z0-9]{40}/) ) {
+			node('build_go1130_memvolume') {
+				container("golang") {
+					def WORKSPACE = pwd()
+					dir("${PROJECT_DIR}") {
+						unstash 'tidb-operator'
+						stage('upload tidb-operator binaries and charts'){
+							withCredentials([
+								string(credentialsId: 'UCLOUD_PUBLIC_KEY', variable: 'UCLOUD_PUBLIC_KEY'),
+								string(credentialsId: 'UCLOUD_PRIVATE_KEY', variable: 'UCLOUD_PRIVATE_KEY'),
+							]) {
+								sh """
+								export UCLOUD_UFILE_PROXY_HOST=mainland-hk.ufileos.com
+								export UCLOUD_UFILE_BUCKET=pingcap-dev
+								export BUILD_BRANCH=${BUILD_BRANCH}
+								export GITHASH=${GITHASH}
+								./ci/upload-binaries-charts.sh
+								"""
+							}
+						}
 					}
 				}
 			}

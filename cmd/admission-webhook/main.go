@@ -15,6 +15,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"os"
 	"time"
 
@@ -22,7 +23,9 @@ import (
 	"github.com/pingcap/tidb-operator/pkg/features"
 	"github.com/pingcap/tidb-operator/pkg/version"
 	"github.com/pingcap/tidb-operator/pkg/webhook"
+	"github.com/pingcap/tidb-operator/pkg/webhook/pod"
 	"k8s.io/component-base/logs"
+	"k8s.io/klog"
 )
 
 var (
@@ -37,7 +40,6 @@ func init() {
 	flag.StringVar(&extraServiceAccounts, "extraServiceAccounts", "", "comma-separated, extra Service Accounts the Webhook should control. The full pattern for each common service account is system:serviceaccount:<namespace>:<serviceaccount-name>")
 	flag.DurationVar(&evictRegionLeaderTimeout, "evictRegionLeaderTimeout", 3*time.Minute, "TiKV evict region leader timeout period, default 3 min")
 	features.DefaultFeatureGate.AddFlag(flag.CommandLine)
-	flag.Parse()
 }
 
 func main() {
@@ -51,10 +53,19 @@ func main() {
 	}
 	version.LogVersionInfo()
 
-	podAh := &webhook.PodAdmissionHook{
+	flag.CommandLine.VisitAll(func(flag *flag.Flag) {
+		klog.V(1).Infof("FLAG: --%s=%q", flag.Name, flag.Value)
+	})
+
+	ah := &webhook.AdmissionHook{
 		ExtraServiceAccounts:     extraServiceAccounts,
 		EvictRegionLeaderTimeout: evictRegionLeaderTimeout,
 	}
-	stsAh := &webhook.StatefulSetAdmissionHook{}
-	cmd.RunAdmissionServer(podAh, stsAh)
+	ns := os.Getenv("NAMESPACE")
+	if len(ns) < 1 {
+		klog.Fatal("ENV NAMESPACE should be set.")
+	}
+	pod.AstsControllerServiceAccounts = fmt.Sprintf("system:serviceaccount:%s:advanced-statefulset-controller", ns)
+
+	cmd.RunAdmissionServer(ah)
 }

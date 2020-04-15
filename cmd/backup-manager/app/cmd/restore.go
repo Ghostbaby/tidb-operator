@@ -25,13 +25,13 @@ import (
 	"github.com/pingcap/tidb-operator/pkg/controller"
 	"github.com/spf13/cobra"
 	"k8s.io/client-go/tools/cache"
-	glog "k8s.io/klog"
+	"k8s.io/klog"
 	cmdutil "k8s.io/kubectl/pkg/cmd/util"
 )
 
 // NewRestoreCommand implements the restore command
 func NewRestoreCommand() *cobra.Command {
-	ro := restore.RestoreOpts{}
+	ro := restore.Options{}
 
 	cmd := &cobra.Command{
 		Use:   "restore",
@@ -42,18 +42,14 @@ func NewRestoreCommand() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVarP(&ro.Namespace, "namespace", "n", "", "Tidb cluster's namespace")
-	cmd.Flags().StringVarP(&ro.TcName, "tidbcluster", "t", "", "Tidb cluster name")
-	cmd.Flags().StringVarP(&ro.Password, "password", "p", "", "Password to use when connecting to tidb cluster")
-	cmd.Flags().StringVarP(&ro.TidbSvc, "tidbservice", "s", "", "Tidb cluster access service address")
-	cmd.Flags().StringVarP(&ro.User, "user", "u", "", "User for login tidb cluster")
-	cmd.Flags().StringVarP(&ro.RestoreName, "restoreName", "r", "", "Restore CRD object name")
-	cmd.Flags().StringVarP(&ro.BackupName, "backupName", "b", "", "Backup CRD object name")
-	cmd.Flags().StringVarP(&ro.BackupPath, "backupPath", "P", "", "The location of the backup")
+	cmd.Flags().StringVar(&ro.Namespace, "namespace", "", "Restore CR's namespace")
+	cmd.Flags().StringVar(&ro.ResourceName, "restoreName", "", "Restore CRD object name")
+	cmd.Flags().BoolVar(&ro.TLSClient, "client-tls", false, "Whether client tls is enabled")
+	cmd.Flags().BoolVar(&ro.TLSCluster, "cluster-tls", false, "Whether cluster tls is enabled")
 	return cmd
 }
 
-func runRestore(restoreOpts restore.RestoreOpts, kubecfg string) error {
+func runRestore(restoreOpts restore.Options, kubecfg string) error {
 	kubeCli, cli, err := util.NewKubeAndCRCli(kubecfg)
 	cmdutil.CheckErr(err)
 	options := []informers.SharedInformerOption{
@@ -71,7 +67,7 @@ func runRestore(restoreOpts restore.RestoreOpts, kubecfg string) error {
 	// waiting for the shared informer's store has synced.
 	cache.WaitForCacheSync(ctx.Done(), restoreInformer.Informer().HasSynced)
 
-	glog.Infof("start to process restore %s", restoreOpts)
-	rm := restore.NewRestoreManager(restoreInformer.Lister(), statusUpdater, restoreOpts)
+	klog.Infof("start to process restore %s", restoreOpts.String())
+	rm := restore.NewManager(restoreInformer.Lister(), statusUpdater, restoreOpts)
 	return rm.ProcessRestore()
 }

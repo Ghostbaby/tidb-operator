@@ -15,19 +15,18 @@ package pod
 
 import (
 	"fmt"
-	"github.com/pingcap/tidb-operator/pkg/controller"
-	"k8s.io/client-go/kubernetes"
 	"time"
 
+	"github.com/pingcap/advanced-statefulset/pkg/apis/apps/v1/helper"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
+	"github.com/pingcap/tidb-operator/pkg/features"
 	"github.com/pingcap/tidb-operator/pkg/label"
 	memberUtil "github.com/pingcap/tidb-operator/pkg/manager/member"
 	"github.com/pingcap/tidb-operator/pkg/pdapi"
 	apps "k8s.io/api/apps/v1"
-	v1 "k8s.io/api/apps/v1"
 	core "k8s.io/api/core/v1"
-	appslisters "k8s.io/client-go/listers/apps/v1"
-	corelisters "k8s.io/client-go/listers/core/v1"
+	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 )
 
 const (
@@ -49,27 +48,23 @@ func IsPodInPdMembers(tc *v1alpha1.TidbCluster, pod *core.Pod, pdClient pdapi.PD
 	return false, nil
 }
 
-func IsStatefulSetUpgrading(set *v1.StatefulSet) bool {
-	return !(set.Status.CurrentRevision == set.Status.UpdateRevision)
-}
-
 // each time we scale in pd replicas, we won't delete the pvc which belong to the
 // pd pod who would be deleted by statefulset controller
 // we add annotations to this pvc and delete it when we scale out the pd replicas
 // for the new pd pod need new pvc
-func addDeferDeletingToPVC(pvc *core.PersistentVolumeClaim, pvcControl controller.PVCControlInterface, tc *v1alpha1.TidbCluster) error {
+func addDeferDeletingToPVC(pvc *core.PersistentVolumeClaim, kubeCli kubernetes.Interface, tc *v1alpha1.TidbCluster) error {
 	if pvc.Annotations == nil {
 		pvc.Annotations = map[string]string{}
 	}
 	now := time.Now().Format(time.RFC3339)
 	pvc.Annotations[label.AnnPVCDeferDeleting] = now
-	_, err := pvcControl.UpdatePVC(tc, pvc)
+	_, err := kubeCli.CoreV1().PersistentVolumeClaims(pvc.Namespace).Update(pvc)
 	return err
 }
 
 // check whether the former upgraded pd pods were healthy in PD cluster during PD upgrading.
 // If not,then return an error
-func checkFormerPDPodStatus(podLister corelisters.PodLister, pdClient pdapi.PDClient, tc *v1alpha1.TidbCluster, namespace string, ordinal int32, replicas int32) error {
+func checkFormerPDPodStatus(kubeCli kubernetes.Interface, pdClient pdapi.PDClient, tc *v1alpha1.TidbCluster, namespace string, ordinal int32, replicas int32) error {
 	healthInfo, err := pdClient.GetHealth()
 	if err != nil {
 		return err
@@ -82,7 +77,7 @@ func checkFormerPDPodStatus(podLister corelisters.PodLister, pdClient pdapi.PDCl
 	tcName := tc.Name
 	for i := replicas - 1; i > ordinal; i-- {
 		podName := memberUtil.PdPodName(tcName, i)
-		pod, err := podLister.Pods(namespace).Get(podName)
+		pod, err := kubeCli.CoreV1().Pods(namespace).Get(podName, meta.GetOptions{})
 		if err != nil {
 			return err
 		}
@@ -125,7 +120,7 @@ func isPDLeader(pdClient pdapi.PDClient, pod *core.Pod) (bool, error) {
 
 // getOwnerStatefulSetForTiDBComponent would find pd/tikv/tidb's owner statefulset,
 // if not exist, then return error
-func getOwnerStatefulSetForTiDBComponent(pod *core.Pod, stsLister appslisters.StatefulSetLister) (*apps.StatefulSet, error) {
+func getOwnerStatefulSetForTiDBComponent(pod *core.Pod, kubeCli kubernetes.Interface) (*apps.StatefulSet, error) {
 	name := pod.Name
 	namespace := pod.Namespace
 	var ownerStatefulSetName string
@@ -138,5 +133,73 @@ func getOwnerStatefulSetForTiDBComponent(pod *core.Pod, stsLister appslisters.St
 	if len(ownerStatefulSetName) == 0 {
 		return nil, fmt.Errorf(failToFindTidbComponentOwnerStatefulset, namespace, name)
 	}
-	return stsLister.StatefulSets(namespace).Get(ownerStatefulSetName)
+	return kubeCli.AppsV1().StatefulSets(namespace).Get(ownerStatefulSetName, meta.GetOptions{})
+}
+
+// checkFormerPodRestartStatus checks whether there are any former pod is going to be restarted
+// return true if existed
+func checkFormerPodRestartStatus(kubeCli kubernetes.Interface, memberType v1alpha1.MemberType, payload *admitPayload, ordinal int32) (bool, error) {
+	namespace := payload.tc.Namespace
+	tc := payload.tc
+	replicas := *payload.ownerStatefulSet.Spec.Replicas
+
+	f := func(name string, ordinal int32, memberType v1alpha1.MemberType) (bool, error) {
+		podName := memberUtil.MemberPodName(tc.Name, ordinal, memberType)
+		pod, err := kubeCli.CoreV1().Pods(namespace).Get(podName, meta.GetOptions{})
+		if err != nil {
+			return false, err
+		}
+		if _, existed := pod.Annotations[label.AnnPodDeferDeleting]; existed {
+			return true, nil
+		}
+		return false, nil
+	}
+
+	if features.DefaultFeatureGate.Enabled(features.AdvancedStatefulSet) {
+		for k := range helper.GetPodOrdinals(replicas, payload.ownerStatefulSet) {
+			if k > ordinal {
+				existed, err := f(tc.Name, k, memberType)
+				if err != nil {
+					return false, err
+				}
+				if existed {
+					return true, nil
+				}
+			}
+		}
+	} else {
+		for i := replicas - 1; i > ordinal; i-- {
+			existed, err := f(tc.Name, i, memberType)
+			if err != nil {
+				return false, err
+			}
+			if existed {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+func appendExtraLabelsENVForTiKV(labels map[string]string, container *core.Container) {
+	s := ""
+	for k, v := range labels {
+		s = fmt.Sprintf("%s,%s", s, fmt.Sprintf("%s=%s", k, v))
+	}
+	s = s[1:]
+	existed := false
+	for id, env := range container.Env {
+		if env.Name == "STORE_LABELS" {
+			env.Value = fmt.Sprintf("%s,%s", env.Value, s)
+			container.Env[id] = env
+			existed = true
+			break
+		}
+	}
+	if !existed {
+		container.Env = append(container.Env, core.EnvVar{
+			Name:  "STORE_LABELS",
+			Value: s,
+		})
+	}
 }

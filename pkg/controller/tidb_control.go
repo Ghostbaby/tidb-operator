@@ -15,16 +15,19 @@ package controller
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
-	"net/http"
-	"time"
-
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/httputil"
-	certutil "github.com/pingcap/tidb-operator/pkg/util/crypto"
+	"github.com/pingcap/tidb-operator/pkg/util"
 	"github.com/pingcap/tidb/config"
+	"io/ioutil"
+	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"net/http"
+	"time"
 )
 
 const (
@@ -34,16 +37,16 @@ const (
 	timeout          = 5 * time.Second
 )
 
-type dbInfo struct {
+type DBInfo struct {
 	IsOwner bool `json:"is_owner"`
 }
 
 // TiDBControlInterface is the interface that knows how to manage tidb peers
 type TiDBControlInterface interface {
 	// GetHealth returns tidb's health info
-	GetHealth(tc *v1alpha1.TidbCluster) map[string]bool
-	// Get TIDB info return tidb's dbInfo
-	GetInfo(tc *v1alpha1.TidbCluster, ordinal int32) (*dbInfo, error)
+	GetHealth(tc *v1alpha1.TidbCluster, ordinal int32) (bool, error)
+	// Get TIDB info return tidb's DBInfo
+	GetInfo(tc *v1alpha1.TidbCluster, ordinal int32) (*DBInfo, error)
 	// GetSettings return the TiDB instance settings
 	GetSettings(tc *v1alpha1.TidbCluster, ordinal int32) (*config.Config, error)
 }
@@ -51,56 +54,68 @@ type TiDBControlInterface interface {
 // defaultTiDBControl is default implementation of TiDBControlInterface.
 type defaultTiDBControl struct {
 	httpClient *http.Client
+	kubeCli    kubernetes.Interface
 }
 
 // NewDefaultTiDBControl returns a defaultTiDBControl instance
-func NewDefaultTiDBControl() TiDBControlInterface {
-	return &defaultTiDBControl{httpClient: &http.Client{Timeout: timeout}}
+func NewDefaultTiDBControl(kubeCli kubernetes.Interface) TiDBControlInterface {
+	return &defaultTiDBControl{httpClient: &http.Client{Timeout: timeout}, kubeCli: kubeCli}
 }
 
-func (tdc *defaultTiDBControl) useTLSHTTPClient(enableTLS bool) error {
-	if enableTLS {
-		rootCAs, err := certutil.ReadCACerts()
-		if err != nil {
-			return err
-		}
-		config := &tls.Config{
-			RootCAs: rootCAs,
-		}
-		tdc.httpClient.Transport = &http.Transport{TLSClientConfig: config}
+func (tdc *defaultTiDBControl) useTLSHTTPClient(tc *v1alpha1.TidbCluster) error {
+	if !tc.IsTLSClusterEnabled() {
+		return nil
 	}
+
+	tcName := tc.Name
+	ns := tc.Namespace
+	secretName := util.ClusterClientTLSSecretName(tcName)
+	secret, err := tdc.kubeCli.CoreV1().Secrets(ns).Get(secretName, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+
+	clientCert, certExists := secret.Data[v1.TLSCertKey]
+	clientKey, keyExists := secret.Data[v1.TLSPrivateKeyKey]
+	if !certExists || !keyExists {
+		return fmt.Errorf("cert or key does not exist in secret %s/%s", ns, secretName)
+	}
+
+	tlsCert, err := tls.X509KeyPair(clientCert, clientKey)
+	if err != nil {
+		return fmt.Errorf("unable to load certificates from secret %s/%s: %v", ns, secretName, err)
+	}
+
+	rootCAs := x509.NewCertPool()
+	rootCAs.AppendCertsFromPEM(secret.Data[v1.ServiceAccountRootCAKey])
+	config := &tls.Config{
+		RootCAs:      rootCAs,
+		Certificates: []tls.Certificate{tlsCert},
+	}
+	tdc.httpClient.Transport = &http.Transport{TLSClientConfig: config}
 	return nil
 }
 
-func (tdc *defaultTiDBControl) GetHealth(tc *v1alpha1.TidbCluster) map[string]bool {
+func (tdc *defaultTiDBControl) GetHealth(tc *v1alpha1.TidbCluster, ordinal int32) (bool, error) {
 	tcName := tc.GetName()
 	ns := tc.GetNamespace()
 	scheme := tc.Scheme()
 
-	result := map[string]bool{}
-
-	if err := tdc.useTLSHTTPClient(tc.Spec.EnableTLSCluster); err != nil {
-		return result
+	if err := tdc.useTLSHTTPClient(tc); err != nil {
+		return false, err
 	}
 
-	for i := 0; i < int(tc.TiDBStsActualReplicas()); i++ {
-		hostName := fmt.Sprintf("%s-%d", TiDBMemberName(tcName), i)
-		url := fmt.Sprintf("%s://%s.%s.%s:10080/status", scheme, hostName, TiDBPeerMemberName(tcName), ns)
-		_, err := tdc.getBodyOK(url)
-		if err != nil {
-			result[hostName] = false
-		} else {
-			result[hostName] = true
-		}
-	}
-	return result
+	hostName := fmt.Sprintf("%s-%d", TiDBMemberName(tcName), ordinal)
+	url := fmt.Sprintf("%s://%s.%s.%s:10080/status", scheme, hostName, TiDBPeerMemberName(tcName), ns)
+	_, err := tdc.getBodyOK(url)
+	return err == nil, nil
 }
 
-func (tdc *defaultTiDBControl) GetInfo(tc *v1alpha1.TidbCluster, ordinal int32) (*dbInfo, error) {
+func (tdc *defaultTiDBControl) GetInfo(tc *v1alpha1.TidbCluster, ordinal int32) (*DBInfo, error) {
 	tcName := tc.GetName()
 	ns := tc.GetNamespace()
 	scheme := tc.Scheme()
-	if err := tdc.useTLSHTTPClient(tc.Spec.EnableTLSCluster); err != nil {
+	if err := tdc.useTLSHTTPClient(tc); err != nil {
 		return nil, err
 	}
 
@@ -123,7 +138,7 @@ func (tdc *defaultTiDBControl) GetInfo(tc *v1alpha1.TidbCluster, ordinal int32) 
 	if err != nil {
 		return nil, err
 	}
-	info := dbInfo{}
+	info := DBInfo{}
 	err = json.Unmarshal(body, &info)
 	if err != nil {
 		return nil, err
@@ -135,7 +150,7 @@ func (tdc *defaultTiDBControl) GetSettings(tc *v1alpha1.TidbCluster, ordinal int
 	tcName := tc.GetName()
 	ns := tc.GetNamespace()
 	scheme := tc.Scheme()
-	if err := tdc.useTLSHTTPClient(tc.Spec.EnableTLSCluster); err != nil {
+	if err := tdc.useTLSHTTPClient(tc); err != nil {
 		return nil, err
 	}
 
@@ -187,7 +202,7 @@ func (tdc *defaultTiDBControl) getBodyOK(apiURL string) ([]byte, error) {
 // FakeTiDBControl is a fake implementation of TiDBControlInterface.
 type FakeTiDBControl struct {
 	healthInfo   map[string]bool
-	tidbInfo     *dbInfo
+	tiDBInfo     *DBInfo
 	getInfoError error
 	tidbConfig   *config.Config
 }
@@ -202,12 +217,19 @@ func (ftd *FakeTiDBControl) SetHealth(healthInfo map[string]bool) {
 	ftd.healthInfo = healthInfo
 }
 
-func (ftd *FakeTiDBControl) GetHealth(_ *v1alpha1.TidbCluster) map[string]bool {
-	return ftd.healthInfo
+func (ftd *FakeTiDBControl) GetHealth(tc *v1alpha1.TidbCluster, ordinal int32) (bool, error) {
+	podName := fmt.Sprintf("%s-%d", TiDBMemberName(tc.GetName()), ordinal)
+	if ftd.healthInfo == nil {
+		return false, nil
+	}
+	if health, ok := ftd.healthInfo[podName]; ok {
+		return health, nil
+	}
+	return false, nil
 }
 
-func (ftd *FakeTiDBControl) GetInfo(tc *v1alpha1.TidbCluster, ordinal int32) (*dbInfo, error) {
-	return ftd.tidbInfo, ftd.getInfoError
+func (ftd *FakeTiDBControl) GetInfo(tc *v1alpha1.TidbCluster, ordinal int32) (*DBInfo, error) {
+	return ftd.tiDBInfo, ftd.getInfoError
 }
 
 func (ftd *FakeTiDBControl) GetSettings(tc *v1alpha1.TidbCluster, ordinal int32) (*config.Config, error) {

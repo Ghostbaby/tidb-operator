@@ -9,7 +9,7 @@
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // See the License for the specific language governing permissions and
-// limitations under the License.package spec
+// limitations under the License.
 
 package label
 
@@ -46,6 +46,9 @@ const (
 	// MemberIDLabelKey is member id label key
 	MemberIDLabelKey string = "tidb.pingcap.com/member-id"
 
+	// InitLabelKey is the key for TiDB initializer
+	InitLabelKey string = "tidb.pingcap.com/initializer"
+
 	// BackupScheduleLabelKey is backup schedule key
 	BackupScheduleLabelKey string = "tidb.pingcap.com/backup-schedule"
 
@@ -79,11 +82,47 @@ const (
 	AnnSysctlInit = "tidb.pingcap.com/sysctl-init"
 	// AnnEvictLeaderBeginTime is pod annotation key to indicate the begin time for evicting region leader
 	AnnEvictLeaderBeginTime = "tidb.pingcap.com/evictLeaderBeginTime"
+	// AnnPodDeferDeleting is pod annotation key to indicate the pod which need to be restarted
+	AnnPodDeferDeleting = "tidb.pingcap.com/pod-defer-deleting"
+	// AnnStsSyncTimestamp is sts annotation key to indicate the last timestamp the operator sync the sts
+	AnnStsLastSyncTimestamp = "tidb.pingcap.com/sync-timestamp"
 
 	// AnnForceUpgradeVal is tc annotation value to indicate whether force upgrade should be done
 	AnnForceUpgradeVal = "true"
 	// AnnSysctlInitVal is pod annotation value to indicate whether configuring sysctls with init container
 	AnnSysctlInitVal = "true"
+
+	// AnnPDDeleteSlots is annotation key of pd delete slots.
+	AnnPDDeleteSlots = "pd.tidb.pingcap.com/delete-slots"
+	// TiDBDeleteSlots is annotation key of tidb delete slots.
+	AnnTiDBDeleteSlots = "tidb.tidb.pingcap.com/delete-slots"
+	// TiKVDeleteSlots is annotation key of tikv delete slots.
+	AnnTiKVDeleteSlots = "tikv.tidb.pingcap.com/delete-slots"
+
+	// AnnTiDBLastAutoScalingTimestamp is annotation key of tidbcluster to indicate the last timestamp for tidb auto-scaling
+	AnnTiDBLastAutoScalingTimestamp = "tidb.tidb.pingcap.com/last-autoscaling-timestamp"
+	// AnnTiKVLastAutoScalingTimestamp is annotation key of tidbclusterto which ordinal is created by tikv auto-scaling
+	AnnTiKVLastAutoScalingTimestamp = "tikv.tidb.pingcap.com/last-autoscaling-timestamp"
+
+	// AnnTiDBConsecutiveScaleOutCount describes the least consecutive count to scale-out for tidb
+	AnnTiDBConsecutiveScaleOutCount = "tidb.tidb.pingcap.com/consecutive-scale-out-count"
+	// AnnTiDBConsecutiveScaleInCount describes the least consecutive count to scale-in for tidb
+	AnnTiDBConsecutiveScaleInCount = "tidb.tidb.pingcap.com/consecutive-scale-in-count"
+	// AnnTiKVConsecutiveScaleOutCount describes the least consecutive count to scale-out for tikv
+	AnnTiKVConsecutiveScaleOutCount = "tikv.tidb.pingcap.com/consecutive-scale-out-count"
+	// AnnTiKVConsecutiveScaleInCount describes the least consecutive count to scale-in for tikv
+	AnnTiKVConsecutiveScaleInCount = "tikv.tidb.pingcap.com/consecutive-scale-in-count"
+	// AnnAutoScalingTargetName describes the target TidbCluster Ref Name for the TidbCluserAutoScaler
+	AnnAutoScalingTargetName = "auto-scaling.tidb.pingcap.com/target-name"
+	// AnnAutoScalingTargetNamespace describes the target TidbCluster Ref Namespace for the TidbCluserAutoScaler
+	AnnAutoScalingTargetNamespace = "auto-scaling.tidb.pingcap.com/target-namespace"
+	// AnnTiKVAutoScalingOutOrdinals describe the tikv pods' ordinal list which is created by auto-scaling out
+	AnnTiKVAutoScalingOutOrdinals = "tikv.tidb.pingcap.com/scale-out-ordinals"
+	// AnnTiDBAutoScalingOutOrdinals describe the tidb pods' ordinal list which is created by auto-scaling out
+	AnnTiDBAutoScalingOutOrdinals = "tidb.tidb.pingcap.com/scale-out-ordinals"
+
+	// AnnSkipTLSWhenConnectTiDB describes whether skip TLS when connecting to TiDB Server
+	AnnSkipTLSWhenConnectTiDB = "tidb.tidb.pingcap.com/skip-tls-when-connect-tidb"
 
 	// PDLabelVal is PD label value
 	PDLabelVal string = "pd"
@@ -91,8 +130,14 @@ const (
 	TiDBLabelVal string = "tidb"
 	// TiKVLabelVal is TiKV label value
 	TiKVLabelVal string = "tikv"
+	// TiFlashLabelVal is TiKV label value
+	TiFlashLabelVal string = "tiflash"
 	// PumpLabelVal is Pump label value
 	PumpLabelVal string = "pump"
+	// DiscoveryLabelVal is Discovery label value
+	DiscoveryLabelVal string = "discovery"
+	// TiDBMonitorVal is Monitor label value
+	TiDBMonitorVal string = "monitor"
 
 	// CleanJobLabelVal is clean job label value
 	CleanJobLabelVal string = "clean"
@@ -100,6 +145,10 @@ const (
 	RestoreJobLabelVal string = "restore"
 	// BackupJobLabelVal is backup job label value
 	BackupJobLabelVal string = "backup"
+	// BackupScheduleJobLabelVal is backup schedule job label value
+	BackupScheduleJobLabelVal string = "backup-schedule"
+	// InitJobLabelVal is TiDB initializer job label value
+	InitJobLabelVal string = "initializer"
 	// TiDBOperator is ManagedByLabelKey label value
 	TiDBOperator string = "tidb-operator"
 )
@@ -111,14 +160,22 @@ type Label map[string]string
 func New() Label {
 	return Label{
 		NameLabelKey:      "tidb-cluster",
-		ManagedByLabelKey: "tidb-operator",
+		ManagedByLabelKey: TiDBOperator,
+	}
+}
+
+// NewInitializer initialize a new Label for Jobs of TiDB initializer
+func NewInitializer() Label {
+	return Label{
+		ComponentLabelKey: InitJobLabelVal,
+		ManagedByLabelKey: TiDBOperator,
 	}
 }
 
 // NewBackup initialize a new Label for Jobs of bakcup
 func NewBackup() Label {
 	return Label{
-		NameLabelKey:      "backup",
+		NameLabelKey:      BackupJobLabelVal,
 		ManagedByLabelKey: "backup-operator",
 	}
 }
@@ -126,7 +183,7 @@ func NewBackup() Label {
 // NewRestore initialize a new Label for Jobs of restore
 func NewRestore() Label {
 	return Label{
-		NameLabelKey:      "restore",
+		NameLabelKey:      RestoreJobLabelVal,
 		ManagedByLabelKey: "restore-operator",
 	}
 }
@@ -134,8 +191,16 @@ func NewRestore() Label {
 // NewBackupSchedule initialize a new Label for backups of bakcup schedule
 func NewBackupSchedule() Label {
 	return Label{
-		NameLabelKey:      "backup-schedule",
+		NameLabelKey:      BackupScheduleJobLabelVal,
 		ManagedByLabelKey: "backup-schedule-operator",
+	}
+}
+
+func NewMonitor() Label {
+	return Label{
+		// NameLabelKey is used to be compatible with helm monitor
+		NameLabelKey:      "tidb-cluster",
+		ManagedByLabelKey: TiDBOperator,
 	}
 }
 
@@ -160,6 +225,12 @@ func (l Label) Component(name string) Label {
 // ComponentType returns component type
 func (l Label) ComponentType() string {
 	return l[ComponentLabelKey]
+}
+
+// Initializer assigns specific value to initializer key in label
+func (l Label) Initializer(val string) Label {
+	l[InitLabelKey] = val
+	return l
 }
 
 // CleanJob assigns clean to component key in label
@@ -210,6 +281,17 @@ func (l Label) Pump() Label {
 	return l
 }
 
+func (l Label) Monitor() Label {
+	l.Component(TiDBMonitorVal)
+	return l
+}
+
+// Discovery assigns discovery to component key in label
+func (l Label) Discovery() Label {
+	l.Component(DiscoveryLabelVal)
+	return l
+}
+
 // IsPD returns whether label is a PD
 func (l Label) IsPD() bool {
 	return l[ComponentLabelKey] == PDLabelVal
@@ -224,6 +306,12 @@ func (l Label) TiDB() Label {
 // TiKV assigns tikv to component key in label
 func (l Label) TiKV() Label {
 	l.Component(TiKVLabelVal)
+	return l
+}
+
+// TiFlash assigns tiflash to component key in label
+func (l Label) TiFlash() Label {
+	l.Component(TiFlashLabelVal)
 	return l
 }
 

@@ -14,11 +14,12 @@
 package member
 
 import (
+	"github.com/pingcap/advanced-statefulset/pkg/apis/apps/v1/helper"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/controller"
 	apps "k8s.io/api/apps/v1"
 	corelisters "k8s.io/client-go/listers/core/v1"
-	glog "k8s.io/klog"
+	"k8s.io/klog"
 )
 
 type tidbUpgrader struct {
@@ -35,6 +36,13 @@ func NewTiDBUpgrader(tidbControl controller.TiDBControlInterface, podLister core
 }
 
 func (tdu *tidbUpgrader) Upgrade(tc *v1alpha1.TidbCluster, oldSet *apps.StatefulSet, newSet *apps.StatefulSet) error {
+
+	// when scale replica to 0 , all nodes crash and tidb is in upgrade phase, this method will throw error about pod is upgrade.
+	// so  directly return nil when scale replica to 0.
+	if tc.Spec.TiDB.Replicas == int32(0) {
+		return nil
+	}
+
 	ns := tc.GetNamespace()
 	tcName := tc.GetName()
 
@@ -48,7 +56,7 @@ func (tdu *tidbUpgrader) Upgrade(tc *v1alpha1.TidbCluster, oldSet *apps.Stateful
 	}
 
 	tc.Status.TiDB.Phase = v1alpha1.UpgradePhase
-	if !templateEqual(newSet.Spec.Template, oldSet.Spec.Template) {
+	if !templateEqual(newSet, oldSet) {
 		return nil
 	}
 
@@ -62,12 +70,14 @@ func (tdu *tidbUpgrader) Upgrade(tc *v1alpha1.TidbCluster, oldSet *apps.Stateful
 		// If we encounter this situation, we will let the native statefulset controller do the upgrade completely, which may be unsafe for upgrading tidb.
 		// Therefore, in the production environment, we should try to avoid modifying the tidb statefulset update strategy directly.
 		newSet.Spec.UpdateStrategy = oldSet.Spec.UpdateStrategy
-		glog.Warningf("tidbcluster: [%s/%s] tidb statefulset %s UpdateStrategy has been modified manually", ns, tcName, oldSet.GetName())
+		klog.Warningf("tidbcluster: [%s/%s] tidb statefulset %s UpdateStrategy has been modified manually", ns, tcName, oldSet.GetName())
 		return nil
 	}
 
 	setUpgradePartition(newSet, *oldSet.Spec.UpdateStrategy.RollingUpdate.Partition)
-	for i := tc.TiDBStsActualReplicas() - 1; i >= 0; i-- {
+	podOrdinals := helper.GetPodOrdinals(*oldSet.Spec.Replicas, oldSet).List()
+	for _i := len(podOrdinals) - 1; _i >= 0; _i-- {
+		i := podOrdinals[_i]
 		podName := tidbPodName(tcName, i)
 		pod, err := tdu.podLister.Pods(ns).Get(podName)
 		if err != nil {

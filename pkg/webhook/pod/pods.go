@@ -19,28 +19,19 @@ import (
 	"time"
 
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
-	apps "k8s.io/api/apps/v1"
-
-	core "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/util/sets"
-
 	"github.com/pingcap/tidb-operator/pkg/client/clientset/versioned"
-	informers "github.com/pingcap/tidb-operator/pkg/client/informers/externalversions"
-	listers "github.com/pingcap/tidb-operator/pkg/client/listers/pingcap/v1alpha1"
-	"github.com/pingcap/tidb-operator/pkg/controller"
+	"github.com/pingcap/tidb-operator/pkg/features"
 	"github.com/pingcap/tidb-operator/pkg/label"
 	memberUtils "github.com/pingcap/tidb-operator/pkg/manager/member"
 	"github.com/pingcap/tidb-operator/pkg/pdapi"
-	operatorUtils "github.com/pingcap/tidb-operator/pkg/util"
 	"github.com/pingcap/tidb-operator/pkg/webhook/util"
 	admission "k8s.io/api/admission/v1beta1"
+	apps "k8s.io/api/apps/v1"
+	core "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	kubeinformers "k8s.io/client-go/informers"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/kubernetes"
-	appslisters "k8s.io/client-go/listers/apps/v1"
-	corelisters "k8s.io/client-go/listers/core/v1"
-	"k8s.io/client-go/tools/record"
 	"k8s.io/klog"
 )
 
@@ -49,16 +40,8 @@ type PodAdmissionControl struct {
 	kubeCli kubernetes.Interface
 	// operator client interface
 	operatorCli versioned.Interface
-	// pvc control
-	pvcControl controller.PVCControlInterface
 	// pd Control
 	pdControl pdapi.PDControlInterface
-	// pod Lister
-	podLister corelisters.PodLister
-	// tc Lister
-	tcLister listers.TidbClusterLister
-	// sts Lister
-	stsLister appslisters.StatefulSetLister
 	// the map of the service account from the request which should be checked by webhook
 	serviceAccounts sets.String
 }
@@ -67,27 +50,24 @@ const (
 	stsControllerServiceAccounts = "system:serviceaccount:kube-system:statefulset-controller"
 )
 
-func NewPodAdmissionControl(kubeCli kubernetes.Interface, operatorCli versioned.Interface, PdControl pdapi.PDControlInterface, informerFactory informers.SharedInformerFactory, kubeInformerFactory kubeinformers.SharedInformerFactory, recorder record.EventRecorder, extraServiceAccounts []string, evictRegionLeaderTimeout time.Duration) *PodAdmissionControl {
+var (
+	AstsControllerServiceAccounts string
+)
 
-	pvcInformer := kubeInformerFactory.Core().V1().PersistentVolumeClaims()
-	PVCControl := controller.NewRealPVCControl(kubeCli, recorder, pvcInformer.Lister())
-	tcLister := informerFactory.Pingcap().V1alpha1().TidbClusters().Lister()
+func NewPodAdmissionControl(kubeCli kubernetes.Interface, operatorCli versioned.Interface, PdControl pdapi.PDControlInterface, extraServiceAccounts []string, evictRegionLeaderTimeout time.Duration) *PodAdmissionControl {
 
-	podLister := kubeInformerFactory.Core().V1().Pods().Lister()
-	stsLister := kubeInformerFactory.Apps().V1().StatefulSets().Lister()
 	serviceAccounts := sets.NewString(stsControllerServiceAccounts)
 	for _, sa := range extraServiceAccounts {
 		serviceAccounts.Insert(sa)
+	}
+	if features.DefaultFeatureGate.Enabled(features.AdvancedStatefulSet) {
+		serviceAccounts.Insert(AstsControllerServiceAccounts)
 	}
 	EvictLeaderTimeout = evictRegionLeaderTimeout
 	return &PodAdmissionControl{
 		kubeCli:         kubeCli,
 		operatorCli:     operatorCli,
-		pvcControl:      PVCControl,
 		pdControl:       PdControl,
-		podLister:       podLister,
-		tcLister:        tcLister,
-		stsLister:       stsLister,
 		serviceAccounts: serviceAccounts,
 	}
 }
@@ -102,6 +82,13 @@ type admitPayload struct {
 	tc *v1alpha1.TidbCluster
 	// the pdClient for target tc
 	pdClient pdapi.PDClient
+}
+
+func (pc *PodAdmissionControl) MutatePods(ar *admission.AdmissionRequest) *admission.AdmissionResponse {
+	if ar.Operation != admission.Create && ar.Operation != admission.Update {
+		return util.ARSuccess()
+	}
+	return pc.mutatePod(ar)
 }
 
 func (pc *PodAdmissionControl) AdmitPods(ar *admission.AdmissionRequest) *admission.AdmissionResponse {
@@ -164,7 +151,7 @@ func (pc *PodAdmissionControl) admitDeletePods(name, namespace string) *admissio
 		return util.ARSuccess()
 	}
 
-	tc, err := pc.tcLister.TidbClusters(namespace).Get(tcName)
+	tc, err := pc.operatorCli.PingcapV1alpha1().TidbClusters(namespace).Get(tcName, metav1.GetOptions{})
 	if err != nil {
 		if errors.IsNotFound(err) {
 			klog.Infof("tc[%s/%s] had been deleted,admit to delete pod[%s/%s]", namespace, tcName, namespace, name)
@@ -174,7 +161,7 @@ func (pc *PodAdmissionControl) admitDeletePods(name, namespace string) *admissio
 		return util.ARFail(err)
 	}
 
-	ownerStatefulSet, err := getOwnerStatefulSetForTiDBComponent(pod, pc.stsLister)
+	ownerStatefulSet, err := getOwnerStatefulSetForTiDBComponent(pod, pc.kubeCli)
 	if err != nil {
 		if errors.IsNotFound(err) || err.Error() == fmt.Sprintf(failToFindTidbComponentOwnerStatefulset, namespace, name) {
 			klog.Infof("owner statefulset for pod[%s/%s] is deleted,admit to delete pod", namespace, name)
@@ -190,14 +177,10 @@ func (pc *PodAdmissionControl) admitDeletePods(name, namespace string) *admissio
 		return util.ARSuccess()
 	}
 
-	ordinal, err := operatorUtils.GetOrdinalFromPodName(name)
-	if err != nil {
-		return util.ARFail(err)
-	}
-
-	// If there was only one replica for this statefulset,admit to delete it.
-	if *ownerStatefulSet.Spec.Replicas == 1 && ordinal == 0 {
-		klog.Infof("tc[%s/%s]'s pd only have one pod[%s/%s],admit to delete it.", namespace, tcName, namespace, name)
+	// When AdvancedStatefulSet is enabled, the ordinal of the last pod in the statefulset could be a non-zero number,
+	// so we let the deleting request of the last pod pass when spec.replicas <= 1 and status.replicas equals 1
+	if *ownerStatefulSet.Spec.Replicas <= 1 && ownerStatefulSet.Status.Replicas == 1 {
+		klog.Infof("tc[%s/%s]'s statefulset only have one pod[%s/%s],admit to delete it.", namespace, tcName, namespace, name)
 		return util.ARSuccess()
 	}
 
@@ -205,7 +188,7 @@ func (pc *PodAdmissionControl) admitDeletePods(name, namespace string) *admissio
 		pod:              pod,
 		tc:               tc,
 		ownerStatefulSet: ownerStatefulSet,
-		pdClient:         pc.pdControl.GetPDClient(pdapi.Namespace(namespace), tcName, tc.Spec.EnableTLSCluster),
+		pdClient:         pc.pdControl.GetPDClient(pdapi.Namespace(namespace), tcName, tc.IsTLSClusterEnabled()),
 	}
 
 	if l.IsPD() {
@@ -250,7 +233,7 @@ func (pc *PodAdmissionControl) AdmitCreatePods(ar *admission.AdmissionRequest) *
 		return util.ARSuccess()
 	}
 
-	tc, err := pc.tcLister.TidbClusters(namespace).Get(tcName)
+	tc, err := pc.operatorCli.PingcapV1alpha1().TidbClusters(namespace).Get(tcName, metav1.GetOptions{})
 	if err != nil {
 		if errors.IsNotFound(err) {
 			return util.ARSuccess()
@@ -265,7 +248,7 @@ func (pc *PodAdmissionControl) AdmitCreatePods(ar *admission.AdmissionRequest) *
 	}
 
 	if l.IsTiKV() {
-		pdClient := pc.pdControl.GetPDClient(pdapi.Namespace(namespace), tcName, tc.Spec.EnableTLSCluster)
+		pdClient := pc.pdControl.GetPDClient(pdapi.Namespace(namespace), tcName, tc.IsTLSClusterEnabled())
 		return pc.admitCreateTiKVPod(pod, tc, pdClient)
 	}
 

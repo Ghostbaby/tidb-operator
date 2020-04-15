@@ -42,6 +42,8 @@ const (
 	TiDBMemberType MemberType = "tidb"
 	// TiKVMemberType is tikv container type
 	TiKVMemberType MemberType = "tikv"
+	// TiFlashMemberType is tiflash container type
+	TiFlashMemberType MemberType = "tiflash"
 	// SlowLogTailerMemberType is tidb log tailer container type
 	SlowLogTailerMemberType MemberType = "slowlog"
 	// UnknownMemberType is unknown container type
@@ -102,153 +104,328 @@ type TidbClusterList struct {
 // +k8s:openapi-gen=true
 // TidbClusterSpec describes the attributes that a user creates on a tidb cluster
 type TidbClusterSpec struct {
-
 	// PD cluster spec
-	PD PDSpec `json:"pd,omitempty"`
+	PD PDSpec `json:"pd"`
 
 	// TiDB cluster spec
-	TiDB TiDBSpec `json:"tidb,omitempty"`
+	TiDB TiDBSpec `json:"tidb"`
 
 	// TiKV cluster spec
-	TiKV TiKVSpec `json:"tikv,omitempty"`
+	TiKV TiKVSpec `json:"tikv"`
+
+	// TiFlash cluster spec
+	// +optional
+	TiFlash *TiFlashSpec `json:"tiflash,omitempty"`
 
 	// Pump cluster spec
+	// +optional
 	Pump *PumpSpec `json:"pump,omitempty"`
 
 	// Helper spec
-	Helper HelperSpec `json:"helper,omitempty"`
+	// +optional
+	Helper *HelperSpec `json:"helper,omitempty"`
 
-	// Services list non-headless services type used in TidbCluster
-	// Deprecated
-	Services []Service `json:"services,omitempty"`
+	// Indicates that the tidb cluster is paused and will not be processed by
+	// the controller.
+	// +optional
+	Paused bool `json:"paused,omitempty"`
 
+	// TODO: remove optional after defaulting logic introduced
 	// TiDB cluster version
-	Version string `json:"version,omitempty"`
+	// +optional
+	Version string `json:"version"`
 
 	// SchedulerName of TiDB cluster Pods
+	// +kubebuilder:default=tidb-scheduler
 	SchedulerName string `json:"schedulerName,omitempty"`
 
 	// Persistent volume reclaim policy applied to the PVs that consumed by TiDB cluster
+	// +kubebuilder:default=Recycle
 	PVReclaimPolicy corev1.PersistentVolumeReclaimPolicy `json:"pvReclaimPolicy,omitempty"`
 
-	// Whether enable PVC reclaim for orphan PVC left by statefulset scale-in
-	EnablePVReclaim bool `json:"enablePVReclaim,omitempty"`
-
-	// Enable TLS connection between TiDB server components
-	EnableTLSCluster bool `json:"enableTLSCluster,omitempty"`
-
-	// Time zone of TiDB cluster Pods
-	Timezone string `json:"timezone,omitempty"`
-
 	// ImagePullPolicy of TiDB cluster Pods
+	// +kubebuilder:default=IfNotPresent
 	ImagePullPolicy corev1.PullPolicy `json:"imagePullPolicy,omitempty"`
 
+	// ConfigUpdateStrategy determines how the configuration change is applied to the cluster.
+	// UpdateStrategyInPlace will update the ConfigMap of configuration in-place and an extra rolling-update of the
+	// cluster component is needed to reload the configuration change.
+	// UpdateStrategyRollingUpdate will create a new ConfigMap with the new configuration and rolling-update the
+	// related components to use the new ConfigMap, that is, the new configuration will be applied automatically.
+	// +kubebuilder:validation:Enum=InPlace,RollingUpdate
+	// +kubebuilder:default=InPlacne
+	ConfigUpdateStrategy ConfigUpdateStrategy `json:"configUpdateStrategy,omitempty"`
+
+	// Whether enable PVC reclaim for orphan PVC left by statefulset scale-in
+	// Optional: Defaults to false
+	// +optional
+	EnablePVReclaim *bool `json:"enablePVReclaim,omitempty"`
+
+	// Whether enable the TLS connection between TiDB server components
+	// Optional: Defaults to nil
+	// +optional
+	TLSCluster *TLSCluster `json:"tlsCluster,omitempty"`
+
 	// Whether Hostnetwork is enabled for TiDB cluster Pods
-	HostNetwork bool `json:"hostNetwork,omitempty"`
+	// Optional: Defaults to false
+	// +optional
+	HostNetwork *bool `json:"hostNetwork,omitempty"`
 
 	// Affinity of TiDB cluster Pods
+	// +optional
 	Affinity *corev1.Affinity `json:"affinity,omitempty"`
 
 	// PriorityClassName of TiDB cluster Pods
-	PriorityClassName string `json:"priorityClassName,omitempty"`
+	// Optional: Defaults to omitted
+	// +optional
+	PriorityClassName *string `json:"priorityClassName,omitempty"`
 
 	// Base node selectors of TiDB cluster Pods, components may add or override selectors upon this respectively
+	// +optional
 	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
 
 	// Base annotations of TiDB cluster Pods, components may add or override selectors upon this respectively
+	// +optional
 	Annotations map[string]string `json:"annotations,omitempty"`
 
-	// Base tolerations of TiDB cluster Pods, components may add more tolreations upon this respectively
+	// Base tolerations of TiDB cluster Pods, components may add more tolerations upon this respectively
+	// +optional
 	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
+
+	// Time zone of TiDB cluster Pods
+	// Optional: Defaults to UTC
+	// +optional
+	Timezone string `json:"timezone,omitempty"`
+
+	// Services list non-headless services type used in TidbCluster
+	// Deprecated
+	// +k8s:openapi-gen=false
+	Services []Service `json:"services,omitempty"`
 }
 
 // TidbClusterStatus represents the current status of a tidb cluster.
 type TidbClusterStatus struct {
-	ClusterID string     `json:"clusterID,omitempty"`
-	PD        PDStatus   `json:"pd,omitempty"`
-	TiKV      TiKVStatus `json:"tikv,omitempty"`
-	TiDB      TiDBStatus `json:"tidb,omitempty"`
+	ClusterID string        `json:"clusterID,omitempty"`
+	PD        PDStatus      `json:"pd,omitempty"`
+	TiKV      TiKVStatus    `json:"tikv,omitempty"`
+	TiDB      TiDBStatus    `json:"tidb,omitempty"`
+	Pump      PumpStatus    `josn:"pump,omitempty"`
+	TiFlash   TiFlashStatus `json:"tiflash,omitempty"`
 }
 
 // +k8s:openapi-gen=true
 // PDSpec contains details of PD members
 type PDSpec struct {
-	// +k8s:openapi-gen=false
-	ComponentSpec
-	// +k8s:openapi-gen=false
-	Resources
+	ComponentSpec               `json:",inline"`
+	corev1.ResourceRequirements `json:",inline"`
+
+	// The desired ready replicas
+	// +kubebuilder:validation:Minimum=1
 	Replicas int32 `json:"replicas"`
-	// +k8s:openapi-gen=false
-	Service          *ServiceSpec `json:"service,omitempty"`
-	StorageClassName string       `json:"storageClassName,omitempty"`
+
+	// TODO: remove optional after defaulting introduced
+	// Base image of the component, image tag is now allowed during validation
+	// +kubebuilder:default=pingcap/pd
+	// +optional
+	BaseImage string `json:"baseImage"`
+
+	// Service defines a Kubernetes service of PD cluster.
+	// Optional: Defaults to `.spec.services` in favor of backward compatibility
+	// +optional
+	Service *ServiceSpec `json:"service,omitempty"`
+
+	// The storageClassName of the persistent volume for PD data storage.
+	// Defaults to Kubernetes default storage class.
+	// +optional
+	StorageClassName *string `json:"storageClassName,omitempty"`
 
 	// Config is the Configuration of pd-servers
+	// +optional
 	Config *PDConfig `json:"config,omitempty"`
 }
 
 // +k8s:openapi-gen=true
 // TiKVSpec contains details of TiKV members
 type TiKVSpec struct {
-	// +k8s:openapi-gen=false
-	ComponentSpec
-	// +k8s:openapi-gen=false
-	Resources
+	ComponentSpec               `json:",inline"`
+	corev1.ResourceRequirements `json:",inline"`
+
+	// Specify a Service Account for tikv
+	ServiceAccount string `json:"serviceAccount,omitempty"`
+
+	// The desired ready replicas
+	// +kubebuilder:validation:Minimum=1
 	Replicas int32 `json:"replicas"`
-	// +k8s:openapi-gen=false
-	Service          *ServiceSpec `json:"service,omitempty"`
-	Privileged       bool         `json:"privileged,omitempty"`
-	StorageClassName string       `json:"storageClassName,omitempty"`
-	MaxFailoverCount int32        `json:"maxFailoverCount,omitempty"`
+
+	// TODO: remove optional after defaulting introduced
+	// Base image of the component, image tag is now allowed during validation
+	// +kubebuilder:default=pingcap/tikv
+	// +optional
+	BaseImage string `json:"baseImage"`
+
+	// Whether create the TiKV container in privileged mode, it is highly discouraged to enable this in
+	// critical environment.
+	// Optional: defaults to false
+	// +optional
+	Privileged *bool `json:"privileged,omitempty"`
+
+	// MaxFailoverCount limit the max replicas could be added in failover, 0 means no failover
+	// Optional: Defaults to 3
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	MaxFailoverCount *int32 `json:"maxFailoverCount,omitempty"`
+
+	// The storageClassName of the persistent volume for TiKV data storage.
+	// Defaults to Kubernetes default storage class.
+	// +optional
+	StorageClassName *string `json:"storageClassName,omitempty"`
 
 	// Config is the Configuration of tikv-servers
+	// +optional
 	Config *TiKVConfig `json:"config,omitempty"`
+}
+
+// TiFlashSpec contains details of TiFlash members
+// +k8s:openapi-gen=true
+type TiFlashSpec struct {
+	ComponentSpec               `json:",inline"`
+	corev1.ResourceRequirements `json:",inline"`
+
+	// Specify a Service Account for TiFlash
+	ServiceAccount string `json:"serviceAccount,omitempty"`
+
+	// The desired ready replicas
+	// +kubebuilder:validation:Minimum=1
+	Replicas int32 `json:"replicas"`
+
+	// Base image of the component, image tag is now allowed during validation
+	// +kubebuilder:default=pingcap/tiflash
+	// +optional
+	BaseImage string `json:"baseImage"`
+
+	// Whether create the TiFlash container in privileged mode, it is highly discouraged to enable this in
+	// critical environment.
+	// Optional: defaults to false
+	// +optional
+	Privileged *bool `json:"privileged,omitempty"`
+
+	// MaxFailoverCount limit the max replicas could be added in failover, 0 means no failover
+	// Optional: Defaults to 3
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	MaxFailoverCount *int32 `json:"maxFailoverCount,omitempty"`
+
+	// The persistent volume claims of the TiFlash data storages.
+	// TiFlash supports multiple disks.
+	StorageClaims []StorageClaim `json:"storageClaims"`
+
+	// Config is the Configuration of TiFlash
+	// +optional
+	Config *TiFlashConfig `json:"config,omitempty"`
+
+	// LogTailer is the configurations of the log tailers for TiFlash
+	// +optional
+	LogTailer *LogTailerSpec `json:"logTailer,omitempty"`
+}
+
+// +k8s:openapi-gen=true
+// LogTailerSpec represents an optional log tailer sidecar container
+type LogTailerSpec struct {
+	corev1.ResourceRequirements `json:",inline"`
+}
+
+// +k8s:openapi-gen=true
+// StorageClaim contains details of TiFlash storages
+type StorageClaim struct {
+	// Resources represents the minimum resources the volume should have.
+	// More info: https://kubernetes.io/docs/concepts/storage/persistent-volumes#resources
+	// +optional
+	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
+	// Name of the StorageClass required by the claim.
+	// More info: https://kubernetes.io/docs/concepts/storage/persistent-volumes#class-1
+	// +optional
+	StorageClassName *string `json:"storageClassName,omitempty"`
 }
 
 // +k8s:openapi-gen=true
 // TiDBSpec contains details of TiDB members
 type TiDBSpec struct {
-	// +k8s:openapi-gen=false
-	ComponentSpec
-	// +k8s:openapi-gen=false
-	Resources
-	Replicas int32 `json:"replicas"`
-	// +k8s:openapi-gen=false
-	Service          *TiDBServiceSpec `json:"service,omitempty"`
-	BinlogEnabled    bool             `json:"binlogEnabled,omitempty"`
-	MaxFailoverCount int32            `json:"maxFailoverCount,omitempty"`
-	SeparateSlowLog  bool             `json:"separateSlowLog,omitempty"`
-	StorageClassName string           `json:"storageClassName,omitempty"`
-	// +k8s:openapi-gen=false
-	SlowLogTailer   TiDBSlowLogTailerSpec `json:"slowLogTailer,omitempty"`
-	EnableTLSClient bool                  `json:"enableTLSClient,omitempty"`
+	ComponentSpec               `json:",inline"`
+	corev1.ResourceRequirements `json:",inline"`
 
+	// The desired ready replicas
+	// +kubebuilder:validation:Minimum=0
+	Replicas int32 `json:"replicas"`
+
+	// TODO: remove optional after defaulting introduced
+	// Base image of the component, image tag is now allowed during validation
+	// +kubebuilder:default=pingcap/tidb
 	// +optional
-	ConfigUpdateStrategy ConfigUpdateStrategy `json:"configUpdateStrategy,omitempty"`
+	BaseImage string `json:"baseImage"`
+
+	// Service defines a Kubernetes service of TiDB cluster.
+	// Optional: No kubernetes service will be created by default.
+	// +optional
+	Service *TiDBServiceSpec `json:"service,omitempty"`
+
+	// Whether enable TiDB Binlog, it is encouraged to not set this field and rely on the default behavior
+	// Optional: Defaults to true if PumpSpec is non-nil, otherwise false
+	// +optional
+	BinlogEnabled *bool `json:"binlogEnabled,omitempty"`
+
+	// MaxFailoverCount limit the max replicas could be added in failover, 0 means no failover
+	// Optional: Defaults to 3
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	MaxFailoverCount *int32 `json:"maxFailoverCount,omitempty"`
+
+	// Whether output the slow log in an separate sidecar container
+	// Optional: Defaults to true
+	// +optional
+	SeparateSlowLog *bool `json:"separateSlowLog,omitempty"`
+
+	// Whether enable the TLS connection between the SQL client and TiDB server
+	// Optional: Defaults to nil
+	// +optional
+	TLSClient *TiDBTLSClient `json:"tlsClient,omitempty"`
+
+	// The spec of the slow log tailer sidecar
+	// +optional
+	SlowLogTailer *TiDBSlowLogTailerSpec `json:"slowLogTailer,omitempty"`
 
 	// Plugins is a list of plugins that are loaded by TiDB server, empty means plugin disabled
 	// +optional
 	Plugins []string `json:"plugins,omitempty"`
 
 	// Config is the Configuration of tidb-servers
+	// +optional
 	Config *TiDBConfig `json:"config,omitempty"`
 }
 
 // +k8s:openapi-gen=true
 // PumpSpec contains details of Pump members
 type PumpSpec struct {
-	// +k8s:openapi-gen=false
-	ComponentSpec
-	// +k8s:openapi-gen=false
-	Resources
+	ComponentSpec               `json:",inline"`
+	corev1.ResourceRequirements `json:",inline"`
 
-	StorageClassName string `json:"storageClassName,omitempty"`
-	Replicas         int32  `json:"replicas"`
+	// The desired ready replicas
+	// +kubebuilder:validation:Minimum=0
+	Replicas int32 `json:"replicas"`
 
-	// ConfigUpdateStrategy determines how to apply the configuration change,
-	// change this field without actually changing the configuration will not trigger rolling-update
-	ConfigUpdateStrategy ConfigUpdateStrategy `json:"configUpdateStrategy,omitempty"`
-	// +k8s:openapi-gen=false
+	// TODO: remove optional after defaulting introduced
+	// Base image of the component, image tag is now allowed during validation
+	// +kubebuilder:default=pingcap/tidb-binlog
+	// +optional
+	BaseImage string `json:"baseImage"`
+
+	// The storageClassName of the persistent volume for Pump data storage.
+	// Defaults to Kubernetes default storage class.
+	// +optional
+	StorageClassName *string `json:"storageClassName,omitempty"`
+
 	// TODO: add schema
+	// The configuration of Pump cluster.
+	// +optional
 	config.GenericConfig `json:",inline"`
 
 	// +k8s:openapi-gen=false
@@ -260,34 +437,30 @@ type PumpSpec struct {
 // HelperSpec contains details of helper component
 type HelperSpec struct {
 	// Image used to tail slow log and set kernel parameters if necessary, must have `tail` and `sysctl` installed
-	Image string `json:"image,omitempty"`
+	// Optional: Defaults to busybox:1.26.2
+	// +optional
+	Image *string `json:"image,omitempty"`
 
 	// ImagePullPolicy of the component. Override the cluster-level imagePullPolicy if present
+	// Optional: Defaults to the cluster-level setting
+	// +optional
 	ImagePullPolicy *corev1.PullPolicy `json:"imagePullPolicy,omitempty"`
 }
 
 // +k8s:openapi-gen=true
 // TiDBSlowLogTailerSpec represents an optional log tailer sidecar with TiDB
 type TiDBSlowLogTailerSpec struct {
-	// +k8s:openapi-gen=false
-	Resources
+	corev1.ResourceRequirements `json:",inline"`
 
 	// Image used for slowlog tailer
 	// Deprecated, use TidbCluster.HelperImage instead
-	Image string `json:"image,omitempty"`
+	// +k8s:openapi-gen=false
+	Image *string `json:"image,omitempty"`
 
 	// ImagePullPolicy of the component. Override the cluster-level imagePullPolicy if present
 	// Deprecated, use TidbCluster.HelperImagePullPolicy instead
+	// +k8s:openapi-gen=false
 	ImagePullPolicy *corev1.PullPolicy `json:"imagePullPolicy,omitempty"`
-}
-
-// +k8s:openapi-gen=true
-type Resources struct {
-	// Resource requests of the component
-	Requests *ResourceRequirement `json:"requests,omitempty"`
-
-	// Resource limits of the component
-	Limits *ResourceRequirement `json:"limits,omitempty"`
 }
 
 // +k8s:openapi-gen=true
@@ -295,53 +468,103 @@ type Resources struct {
 type ComponentSpec struct {
 	// Image of the component, override baseImage and version if present
 	// Deprecated
+	// +k8s:openapi-gen=false
 	Image string `json:"image,omitempty"`
 
-	// Base image of the component, e.g. pingcap/tidb, image tag is now allowed during validation
-	BaseImage string `json:"baseImage,omitempty"`
-
 	// Version of the component. Override the cluster-level version if non-empty
-	Version string `json:"version,omitempty"`
+	// Optional: Defaults to cluster-level setting
+	// +optional
+	Version *string `json:"version,omitempty"`
 
 	// ImagePullPolicy of the component. Override the cluster-level imagePullPolicy if present
+	// Optional: Defaults to cluster-level setting
+	// +optional
 	ImagePullPolicy *corev1.PullPolicy `json:"imagePullPolicy,omitempty"`
 
 	// Whether Hostnetwork of the component is enabled. Override the cluster-level setting if present
+	// Optional: Defaults to cluster-level setting
+	// +optional
 	HostNetwork *bool `json:"hostNetwork,omitempty"`
 
 	// Affinity of the component. Override the cluster-level one if present
+	// Optional: Defaults to cluster-level setting
+	// +optional
 	Affinity *corev1.Affinity `json:"affinity,omitempty"`
 
 	// PriorityClassName of the component. Override the cluster-level one if present
-	PriorityClassName string `json:"priorityClassName,omitempty"`
+	// Optional: Defaults to cluster-level setting
+	// +optional
+	PriorityClassName *string `json:"priorityClassName,omitempty"`
 
 	// SchedulerName of the component. Override the cluster-level one if present
-	SchedulerName string `json:"schedulerName,omitempty"`
+	// Optional: Defaults to cluster-level setting
+	// +optional
+	SchedulerName *string `json:"schedulerName,omitempty"`
 
 	// NodeSelector of the component. Merged into the cluster-level nodeSelector if non-empty
+	// Optional: Defaults to cluster-level setting
+	// +optional
 	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
 
 	// Annotations of the component. Merged into the cluster-level annotations if non-empty
+	// Optional: Defaults to cluster-level setting
+	// +optional
 	Annotations map[string]string `json:"annotations,omitempty"`
 
 	// Tolerations of the component. Override the cluster-level tolerations if non-empty
+	// Optional: Defaults to cluster-level setting
+	// +optional
 	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
 
 	// PodSecurityContext of the component
-	// TODO: make this configurable at cluster level
+	// +optional
 	PodSecurityContext *corev1.PodSecurityContext `json:"podSecurityContext,omitempty"`
+
+	// ConfigUpdateStrategy of the component. Override the cluster-level updateStrategy if present
+	// Optional: Defaults to cluster-level setting
+	// +optional
+	ConfigUpdateStrategy *ConfigUpdateStrategy `json:"configUpdateStrategy,omitempty"`
+
+	// List of environment variables to set in the container, like
+	// v1.Container.Env.
+	// Note that following env names cannot be used and may be overrided by
+	// tidb-operator built envs.
+	// - NAMESPACE
+	// - TZ
+	// - SERVICE_NAME
+	// - PEER_SERVICE_NAME
+	// - HEADLESS_SERVICE_NAME
+	// - SET_NAME
+	// - HOSTNAME
+	// - CLUSTER_NAME
+	// - POD_NAME
+	// - BINLOG_ENABLED
+	// - SLOW_LOG_FILE
+	// +optional
+	Env []corev1.EnvVar `json:"env,omitempty"`
 }
 
 // +k8s:openapi-gen=true
 type ServiceSpec struct {
-	// Type of the real kubernetes service, e.g. ClusterIP
+	// Type of the real kubernetes service
 	Type corev1.ServiceType `json:"type,omitempty"`
 
 	// Additional annotations of the kubernetes service object
+	// +optional
 	Annotations map[string]string `json:"annotations,omitempty"`
 
 	// LoadBalancerIP is the loadBalancerIP of service
-	LoadBalancerIP string `json:"loadBalancerIP,omitempty"`
+	// Optional: Defaults to omitted
+	// +optional
+	LoadBalancerIP *string `json:"loadBalancerIP,omitempty"`
+
+	// ClusterIP is the clusterIP of service
+	// +optional
+	ClusterIP *string `json:"clusterIP,omitempty"`
+
+	// PortName is the name of service port
+	// +optional
+	PortName *string `json:"portName,omitempty"`
 }
 
 // +k8s:openapi-gen=true
@@ -350,13 +573,17 @@ type TiDBServiceSpec struct {
 	ServiceSpec
 
 	// ExternalTrafficPolicy of the service
-	ExternalTrafficPolicy corev1.ServiceExternalTrafficPolicyType `json:"externalTrafficPolicy,omitempty"`
+	// Optional: Defaults to omitted
+	// +optional
+	ExternalTrafficPolicy *corev1.ServiceExternalTrafficPolicyType `json:"externalTrafficPolicy,omitempty"`
 
 	// Whether expose the status port
-	ExposeStatus bool `json:"exposeStatus,omitempty"`
+	// Optional: Defaults to true
+	// +optional
+	ExposeStatus *bool `json:"exposeStatus,omitempty"`
 }
 
-// +k8s:openapi-gen=true
+// +k8s:openapi-gen=false
 // Deprecated
 // Service represent service type used in TidbCluster
 type Service struct {
@@ -364,25 +591,16 @@ type Service struct {
 	Type string `json:"type,omitempty"`
 }
 
-// +k8s:openapi-gen=true
-// ResourceRequirement is resource requirements for a pod
-type ResourceRequirement struct {
-	// CPU is how many cores a pod requires
-	CPU string `json:"cpu,omitempty"`
-	// Memory is how much memory a pod requires
-	Memory string `json:"memory,omitempty"`
-	// Storage is storage size a pod requires
-	Storage string `json:"storage,omitempty"`
-}
-
 // PDStatus is PD status
 type PDStatus struct {
-	Synced         bool                       `json:"synced,omitempty"`
-	Phase          MemberPhase                `json:"phase,omitempty"`
-	StatefulSet    *apps.StatefulSetStatus    `json:"statefulSet,omitempty"`
-	Members        map[string]PDMember        `json:"members,omitempty"`
-	Leader         PDMember                   `json:"leader,omitempty"`
-	FailureMembers map[string]PDFailureMember `json:"failureMembers,omitempty"`
+	Synced          bool                       `json:"synced,omitempty"`
+	Phase           MemberPhase                `json:"phase,omitempty"`
+	StatefulSet     *apps.StatefulSetStatus    `json:"statefulSet,omitempty"`
+	Members         map[string]PDMember        `json:"members,omitempty"`
+	Leader          PDMember                   `json:"leader,omitempty"`
+	FailureMembers  map[string]PDFailureMember `json:"failureMembers,omitempty"`
+	UnjoinedMembers map[string]UnjoinedMember  `json:"unjoinedMembers,omitempty"`
+	Image           string                     `json:"image,omitempty"`
 }
 
 // PDMember is PD member
@@ -406,6 +624,13 @@ type PDFailureMember struct {
 	CreatedAt     metav1.Time `json:"createdAt,omitempty"`
 }
 
+// UnjoinedMember is the pd unjoin cluster member information
+type UnjoinedMember struct {
+	PodName   string      `json:"podName,omitempty"`
+	PVCUID    types.UID   `json:"pvcUID,omitempty"`
+	CreatedAt metav1.Time `json:"createdAt,omitempty"`
+}
+
 // TiDBStatus is TiDB status
 type TiDBStatus struct {
 	Phase                    MemberPhase                  `json:"phase,omitempty"`
@@ -413,6 +638,7 @@ type TiDBStatus struct {
 	Members                  map[string]TiDBMember        `json:"members,omitempty"`
 	FailureMembers           map[string]TiDBFailureMember `json:"failureMembers,omitempty"`
 	ResignDDLOwnerRetryCount int32                        `json:"resignDDLOwnerRetryCount,omitempty"`
+	Image                    string                       `json:"image,omitempty"`
 }
 
 // TiDBMember is TiDB member
@@ -439,6 +665,18 @@ type TiKVStatus struct {
 	Stores          map[string]TiKVStore        `json:"stores,omitempty"`
 	TombstoneStores map[string]TiKVStore        `json:"tombstoneStores,omitempty"`
 	FailureStores   map[string]TiKVFailureStore `json:"failureStores,omitempty"`
+	Image           string                      `json:"image,omitempty"`
+}
+
+// TiFlashStatus is TiFlash status
+type TiFlashStatus struct {
+	Synced          bool                        `json:"synced,omitempty"`
+	Phase           MemberPhase                 `json:"phase,omitempty"`
+	StatefulSet     *apps.StatefulSetStatus     `json:"statefulSet,omitempty"`
+	Stores          map[string]TiKVStore        `json:"stores,omitempty"`
+	TombstoneStores map[string]TiKVStore        `json:"tombstoneStores,omitempty"`
+	FailureStores   map[string]TiKVFailureStore `json:"failureStores,omitempty"`
+	Image           string                      `json:"image,omitempty"`
 }
 
 // TiKVStores is either Up/Down/Offline/Tombstone
@@ -459,6 +697,61 @@ type TiKVFailureStore struct {
 	PodName   string      `json:"podName,omitempty"`
 	StoreID   string      `json:"storeID,omitempty"`
 	CreatedAt metav1.Time `json:"createdAt,omitempty"`
+}
+
+// PumpStatus is Pump status
+type PumpStatus struct {
+	Phase       MemberPhase             `json:"phase,omitempty"`
+	StatefulSet *apps.StatefulSetStatus `json:"statefulSet,omitempty"`
+}
+
+// TiDBTLSClient can enable TLS connection between TiDB server and MySQL client
+type TiDBTLSClient struct {
+	// When enabled, TiDB will accept TLS encrypted connections from MySQL client
+	// The steps to enable this feature:
+	//   1. Generate a TiDB server-side certificate and a client-side certifiacete for the TiDB cluster.
+	//      There are multiple ways to generate certificates:
+	//        - user-provided certificates: https://pingcap.com/docs/stable/how-to/secure/enable-tls-clients/
+	//        - use the K8s built-in certificate signing system signed certificates: https://kubernetes.io/docs/tasks/tls/managing-tls-in-a-cluster/
+	//        - or use cert-manager signed certificates: https://cert-manager.io/
+	//   2. Create a K8s Secret object which contains the TiDB server-side certificate created above.
+	//      The name of this Secret must be: <clusterName>-tidb-server-secret.
+	//        kubectl create secret generic <clusterName>-tidb-server-secret --namespace=<namespace> --from-file=tls.crt=<path/to/tls.crt> --from-file=tls.key=<path/to/tls.key> --from-file=ca.crt=<path/to/ca.crt>
+	//   3. Create a K8s Secret object which contains the TiDB client-side certificate created above which will be used by TiDB Operator.
+	//      The name of this Secret must be: <clusterName>-tidb-client-secret.
+	//        kubectl create secret generic <clusterName>-tidb-client-secret --namespace=<namespace> --from-file=tls.crt=<path/to/tls.crt> --from-file=tls.key=<path/to/tls.key> --from-file=ca.crt=<path/to/ca.crt>
+	//   4. Set Enabled to `true`.
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+	// Specify a secret of client cert for backup/restore
+	// Optional: Defaults to <cluster>-tidb-client-secret
+	// +optional
+	// If you want to specify a secret for backup/restore, generate a Secret Object according to the third step of the above procedure, The difference is the Secret Name can be freely defined, and then copy the Secret Name to TLSSecret
+	// this field only work in backup/restore process
+	TLSSecret string `json:"tlsSecret,omitempty"`
+}
+
+// TLSCluster can enable TLS connection between TiDB server components
+// https://pingcap.com/docs/stable/how-to/secure/enable-tls-between-components/
+type TLSCluster struct {
+	// Enable mutual TLS authentication among TiDB components
+	// Once enabled, the mutual authentication applies to all components,
+	// and it does not support applying to only part of the components.
+	// The steps to enable this feature:
+	//   1. Generate TiDB server components certificates and a client-side certifiacete for them.
+	//      There are multiple ways to generate these certificates:
+	//        - user-provided certificates: https://pingcap.com/docs/stable/how-to/secure/generate-self-signed-certificates/
+	//        - use the K8s built-in certificate signing system signed certificates: https://kubernetes.io/docs/tasks/tls/managing-tls-in-a-cluster/
+	//        - or use cert-manager signed certificates: https://cert-manager.io/
+	//   2. Create one secret object for one component which contains the certificates created above.
+	//      The name of this Secret must be: <clusterName>-<componentName>-cluster-secret.
+	//        For PD: kubectl create secret generic <clusterName>-pd-cluster-secret --namespace=<namespace> --from-file=tls.crt=<path/to/tls.crt> --from-file=tls.key=<path/to/tls.key> --from-file=ca.crt=<path/to/ca.crt>
+	//        For TiKV: kubectl create secret generic <clusterName>-tikv-cluster-secret --namespace=<namespace> --from-file=tls.crt=<path/to/tls.crt> --from-file=tls.key=<path/to/tls.key> --from-file=ca.crt=<path/to/ca.crt>
+	//        For TiDB: kubectl create secret generic <clusterName>-tidb-cluster-secret --namespace=<namespace> --from-file=tls.crt=<path/to/tls.crt> --from-file=tls.key=<path/to/tls.key> --from-file=ca.crt=<path/to/ca.crt>
+	//        For Client: kubectl create secret generic <clusterName>-cluster-client-secret --namespace=<namespace> --from-file=tls.crt=<path/to/tls.crt> --from-file=tls.key=<path/to/tls.key> --from-file=ca.crt=<path/to/ca.crt>
+	//        Same for other components.
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
 }
 
 // +genclient
@@ -495,9 +788,10 @@ type BackupStorageType string
 const (
 	// BackupStorageTypeS3 represents all storage that compatible with the Amazon S3.
 	BackupStorageTypeS3 BackupStorageType = "s3"
-
 	// BackupStorageTypeGcs represents the google cloud storage
 	BackupStorageTypeGcs BackupStorageType = "gcs"
+	// BackupStorageTypeUnknown represents the unknown storage type
+	BackupStorageTypeUnknown BackupStorageType = "unknown"
 )
 
 // +k8s:openapi-gen=true
@@ -525,7 +819,10 @@ type S3StorageProvider struct {
 	Provider S3StorageProviderType `json:"provider"`
 	// Region in which the S3 compatible bucket is located.
 	Region string `json:"region,omitempty"`
-	// Bucket in which to store the Backup.
+	// Path is the full path where the backup is saved.
+	// The format of the path must be: "<bucket-name>/<path-to-backup-file>"
+	Path string `json:"path,omitempty"`
+	// Bucket in which to store the backup data.
 	Bucket string `json:"bucket,omitempty"`
 	// Endpoint of S3 compatible storage service
 	Endpoint string `json:"endpoint,omitempty"`
@@ -535,7 +832,11 @@ type S3StorageProvider struct {
 	Acl string `json:"acl,omitempty"`
 	// SecretName is the name of secret which stores
 	// S3 compliant storage access key and secret key.
-	SecretName string `json:"secretName"`
+	SecretName string `json:"secretName,omitempty"`
+	// Prefix for the keys.
+	Prefix string `json:"prefix,omitempty"`
+	// SSE Sever-Side Encryption.
+	SSE string `json:"sse,omitempty"`
 }
 
 // +k8s:openapi-gen=true
@@ -545,7 +846,10 @@ type GcsStorageProvider struct {
 	ProjectId string `json:"projectId"`
 	// Location in which the gcs bucket is located.
 	Location string `json:"location,omitempty"`
-	// Bucket in which to store the Backup.
+	// Path is the full path where the backup is saved.
+	// The format of the path must be: "<bucket-name>/<path-to-backup-file>"
+	Path string `json:"path,omitempty"`
+	// Bucket in which to store the backup data.
 	Bucket string `json:"bucket,omitempty"`
 	// StorageClass represents the storage class
 	StorageClass string `json:"storageClass,omitempty"`
@@ -567,26 +871,89 @@ const (
 	BackupTypeFull BackupType = "full"
 	// BackupTypeInc represents the incremental backup of tidb cluster.
 	BackupTypeInc BackupType = "incremental"
+	// BackupTypeDB represents the backup of one DB for the tidb cluster.
+	BackupTypeDB BackupType = "db"
+	// BackupTypeTable represents the backup of one table for the tidb cluster.
+	BackupTypeTable BackupType = "table"
 )
+
+// +k8s:openapi-gen=true
+// TiDBAccessConfig defines the configuration for access tidb cluster
+type TiDBAccessConfig struct {
+	// Host is the tidb cluster access address
+	Host string `json:"host"`
+	// Port is the port number to use for connecting tidb cluster
+	Port int32 `json:"port,omitempty"`
+	// User is the user for login tidb cluster
+	User string `json:"user,omitempty"`
+	// SecretName is the name of secret which stores tidb cluster's password.
+	SecretName string `json:"secretName"`
+	// Whether enable the TLS connection between the SQL client and TiDB server
+	// Optional: Defaults to nil
+	// +optional
+	TLSClient *TiDBTLSClient `json:"tlsClient,omitempty"`
+}
 
 // +k8s:openapi-gen=true
 // BackupSpec contains the backup specification for a tidb cluster.
 type BackupSpec struct {
-	// Cluster is the Cluster to backup.
-	Cluster string `json:"cluster"`
-	// TidbSecretName is the name of secret which stores
-	// tidb cluster's username and password.
-	TidbSecretName string `json:"tidbSecretName"`
+	// From is the tidb cluster that needs to backup.
+	From TiDBAccessConfig `json:"from,omitempty"`
 	// Type is the backup type for tidb cluster.
 	Type BackupType `json:"backupType,omitempty"`
-	// StorageType is the backup storage type.
-	StorageType BackupStorageType `json:"storageType"`
+	// TikvGCLifeTime is to specify the safe gc life time for backup.
+	// The time limit during which data is retained for each GC, in the format of Go Duration.
+	// When a GC happens, the current time minus this value is the safe point.
+	TikvGCLifeTime *string `json:"tikvGCLifeTime,omitempty"`
 	// StorageProvider configures where and how backups should be stored.
 	StorageProvider `json:",inline"`
-	// StorageClassName is the storage class for backup job's PV.
-	StorageClassName string `json:"storageClassName"`
+	// The storageClassName of the persistent volume for Backup data storage.
+	// Defaults to Kubernetes default storage class.
+	// +optional
+	StorageClassName *string `json:"storageClassName,omitempty"`
 	// StorageSize is the request storage size for backup job
-	StorageSize string `json:"storageSize"`
+	StorageSize string `json:"storageSize,omitempty"`
+	// BRConfig is the configs for BR
+	BR *BRConfig `json:"br,omitempty"`
+	// Base tolerations of backup Pods, components may add more tolerations upon this respectively
+	// +optional
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
+	// Affinity of backup Pods
+	// +optional
+	Affinity *corev1.Affinity `json:"affinity,omitempty"`
+	// Use KMS to decrypt the secrets
+	UseKMS bool `json:"useKMS,omitempty"`
+	// Specify service account of backup
+	ServiceAccount string `json:"serviceAccount,omitempty"`
+}
+
+// +k8s:openapi-gen=true
+// BRConfig contains config for BR
+type BRConfig struct {
+	// ClusterName of backup/restore cluster
+	Cluster string `json:"cluster"`
+	// Namespace of backup/restore cluster
+	ClusterNamespace string `json:"clusterNamespace,omitempty"`
+	// DB is the specific DB which will be backed-up or restored
+	DB string `json:"db,omitempty"`
+	// Table is the specific table which will be backed-up or restored
+	Table string `json:"table,omitempty"`
+	// LogLevel is the log level
+	LogLevel string `json:"logLevel,omitempty"`
+	// StatusAddr is the HTTP listening address for the status report service. Set to empty string to disable
+	StatusAddr string `json:"statusAddr,omitempty"`
+	// Concurrency is the size of thread pool on each node that execute the backup task
+	Concurrency *uint32 `json:"concurrency,omitempty"`
+	// RateLimit is the rate limit of the backup task, MB/s per node
+	RateLimit *uint `json:"rateLimit,omitempty"`
+	// TimeAgo is the history version of the backup task, e.g. 1m, 1h
+	TimeAgo string `json:"timeAgo,omitempty"`
+	// Checksum specifies whether to run checksum after backup
+	Checksum *bool `json:"checksum,omitempty"`
+	// SendCredToTikv specifies whether to send credentials to TiKV
+	SendCredToTikv *bool `json:"sendCredToTikv,omitempty"`
+	// OnLine specifies whether online during restore
+	OnLine *bool `json:"onLine,omitempty"`
 }
 
 // BackupConditionType represents a valid condition of a Backup.
@@ -606,6 +973,8 @@ const (
 	BackupFailed BackupConditionType = "Failed"
 	// BackupRetryFailed means this failure can be retried
 	BackupRetryFailed BackupConditionType = "RetryFailed"
+	// BackupInvalid means invalid backup CR
+	BackupInvalid BackupConditionType = "Invalid"
 )
 
 // BackupCondition describes the observed state of a Backup at a certain point.
@@ -672,8 +1041,10 @@ type BackupScheduleSpec struct {
 	MaxReservedTime *string `json:"maxReservedTime,omitempty"`
 	// BackupTemplate is the specification of the backup structure to get scheduled.
 	BackupTemplate BackupSpec `json:"backupTemplate"`
-	// StorageClassName is the storage class for backup job's PV.
-	StorageClassName string `json:"storageClassName,omitempty"`
+	// The storageClassName of the persistent volume for Backup data storage if not storage class name set in BackupSpec.
+	// Defaults to Kubernetes default storage class.
+	// +optional
+	StorageClassName *string `json:"storageClassName,omitempty"`
 	// StorageSize is the request storage size for backup job
 	StorageSize string `json:"storageSize,omitempty"`
 }
@@ -730,6 +1101,8 @@ const (
 	RestoreFailed RestoreConditionType = "Failed"
 	// RestoreRetryFailed means this failure can be retried
 	RestoreRetryFailed RestoreConditionType = "RetryFailed"
+	// RestoreInvalid means invalid restore CR.
+	RestoreInvalid RestoreConditionType = "Invalid"
 )
 
 // RestoreCondition describes the observed state of a Restore at a certain point.
@@ -744,19 +1117,34 @@ type RestoreCondition struct {
 // +k8s:openapi-gen=true
 // RestoreSpec contains the specification for a restore of a tidb cluster backup.
 type RestoreSpec struct {
-	// Cluster represents the tidb cluster to be restored.
-	Cluster string `json:"cluster"`
-	// Backup represents the backup object to be restored.
-	Backup string `json:"backup"`
-	// Namespace is the namespace of the backup.
-	BackupNamespace string `json:"backupNamespace"`
-	// SecretName is the name of the secret which stores
-	// tidb cluster's username and password.
-	TidbSecretName string `json:"tidbSecretName"`
-	// StorageClassName is the storage class for restore job's PV.
-	StorageClassName string `json:"storageClassName"`
-	// StorageSize is the request storage size for restore job
-	StorageSize string `json:"storageSize"`
+	// To is the tidb cluster that needs to restore.
+	To TiDBAccessConfig `json:"to,omitempty"`
+	// Type is the backup type for tidb cluster.
+	Type BackupType `json:"backupType,omitempty"`
+	// TikvGCLifeTime is to specify the safe gc life time for restore.
+	// The time limit during which data is retained for each GC, in the format of Go Duration.
+	// When a GC happens, the current time minus this value is the safe point.
+	TikvGCLifeTime *string `json:"tikvGCLifeTime,omitempty"`
+	// StorageProvider configures where and how backups should be stored.
+	StorageProvider `json:",inline"`
+	// The storageClassName of the persistent volume for Restore data storage.
+	// Defaults to Kubernetes default storage class.
+	// +optional
+	StorageClassName *string `json:"storageClassName,omitempty"`
+	// StorageSize is the request storage size for backup job
+	StorageSize string `json:"storageSize,omitempty"`
+	// BR is the configs for BR.
+	BR *BRConfig `json:"br,omitempty"`
+	// Base tolerations of restore Pods, components may add more tolerations upon this respectively
+	// +optional
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
+	// Affinity of restore Pods
+	// +optional
+	Affinity *corev1.Affinity `json:"affinity,omitempty"`
+	// Use KMS to decrypt the secrets
+	UseKMS bool `json:"useKMS,omitempty"`
+	// Specify service account of restore
+	ServiceAccount string `json:"serviceAccount,omitempty"`
 }
 
 // RestoreStatus represents the current status of a tidb cluster restore.

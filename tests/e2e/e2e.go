@@ -19,6 +19,7 @@ import (
 	"fmt"
 	_ "net/http/pprof"
 	"os"
+	"os/exec"
 	"path"
 	"testing"
 	"time"
@@ -32,16 +33,35 @@ import (
 	"github.com/pingcap/tidb-operator/pkg/version"
 	"github.com/pingcap/tidb-operator/tests"
 	e2econfig "github.com/pingcap/tidb-operator/tests/e2e/config"
+	utilimage "github.com/pingcap/tidb-operator/tests/e2e/util/image"
+	utilnode "github.com/pingcap/tidb-operator/tests/e2e/util/node"
+	utiloperator "github.com/pingcap/tidb-operator/tests/e2e/util/operator"
 	v1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
+	apiextensionsclientset "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	runtimeutils "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/component-base/logs"
 	"k8s.io/klog"
+	aggregatorclientset "k8s.io/kube-aggregator/pkg/client/clientset_generated/clientset"
+	storageutil "k8s.io/kubernetes/pkg/apis/storage/v1/util"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2elog "k8s.io/kubernetes/test/e2e/framework/log"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
+
+	// ensure auth plugins are loaded
+	_ "k8s.io/client-go/plugin/pkg/client/auth"
+
+	// ensure that cloud providers are loaded
+	_ "k8s.io/kubernetes/test/e2e/framework/providers/aws"
+	_ "k8s.io/kubernetes/test/e2e/framework/providers/gce"
+)
+
+var (
+	operatorKillerStopCh chan struct{}
 )
 
 // This is modified from framework.SetupSuite().
@@ -61,14 +81,20 @@ func setupSuite() {
 	// Delete any namespaces except those created by the system. This ensures no
 	// lingering resources are left over from a previous test run.
 	if framework.TestContext.CleanStart {
-		deleted, err := framework.DeleteNamespaces(c, nil, /* deleteFilter */
-			[]string{
-				metav1.NamespaceSystem,
-				metav1.NamespaceDefault,
-				metav1.NamespacePublic,
-				v1.NamespaceNodeLease,
-				"tidb-operator-e2e", // namespace to run e2e pod
-			})
+		reservedNamespaces := []string{
+			metav1.NamespaceSystem,
+			metav1.NamespaceDefault,
+			metav1.NamespacePublic,
+			v1.NamespaceNodeLease,
+		}
+		if framework.TestContext.Provider == "kind" {
+			// kind local path provisioner namespace since 0.7.0
+			// https://github.com/kubernetes-sigs/kind/blob/v0.7.0/pkg/build/node/storage.go#L35
+			reservedNamespaces = append(reservedNamespaces, "local-path-storage")
+		} else if framework.TestContext.Provider == "openshift" {
+			reservedNamespaces = append(reservedNamespaces, "openshift")
+		}
+		deleted, err := framework.DeleteNamespaces(c, nil, reservedNamespaces)
 		if err != nil {
 			e2elog.Failf("Error deleting orphaned namespaces: %v", err)
 		}
@@ -107,6 +133,47 @@ func setupSuite() {
 		e2elog.Logf("WARNING: Waiting for all daemonsets to be ready failed: %v", err)
 	}
 
+	ginkgo.By("Initializing all nodes")
+	nodeList, err := c.CoreV1().Nodes().List(metav1.ListOptions{})
+	framework.ExpectNoError(err)
+	for _, node := range nodeList.Items {
+		framework.Logf("Initializing node %q", node.Name)
+		framework.ExpectNoError(utilnode.InitNode(&node))
+	}
+
+	// By using default storage class in GKE/EKS (aws), network attached storage
+	// which be used and we must clean them later.
+	// We set local-storage class as default for simplicity.
+	// The default storage class of kind is local-path-provisioner which
+	// consumes local storage like local-volume-provisioner.
+	if framework.TestContext.Provider == "gke" || framework.TestContext.Provider == "aws" {
+		defaultSCName := "local-storage"
+		list, err := c.StorageV1().StorageClasses().List(metav1.ListOptions{})
+		framework.ExpectNoError(err)
+		// only one storage class can be marked default
+		// https://kubernetes.io/docs/tasks/administer-cluster/change-default-storage-class/#changing-the-default-storageclass
+		var localStorageSC *storagev1.StorageClass
+		for i, sc := range list.Items {
+			if sc.Name == defaultSCName {
+				localStorageSC = &list.Items[i]
+			} else if storageutil.IsDefaultAnnotation(sc.ObjectMeta) {
+				delete(sc.ObjectMeta.Annotations, storageutil.IsDefaultStorageClassAnnotation)
+				_, err = c.StorageV1().StorageClasses().Update(&sc)
+				framework.ExpectNoError(err)
+			}
+		}
+		if localStorageSC == nil {
+			e2elog.Fail("local-storage storage class not found")
+		}
+		if localStorageSC.Annotations == nil {
+			localStorageSC.Annotations = map[string]string{}
+		}
+		localStorageSC.Annotations[storageutil.IsDefaultStorageClassAnnotation] = "true"
+		e2elog.Logf("Setting %q as the default storage class", localStorageSC.Name)
+		_, err = c.StorageV1().StorageClasses().Update(localStorageSC)
+		framework.ExpectNoError(err)
+	}
+
 	// Log the version of the server and this client.
 	e2elog.Logf("e2e test version: %s", version.Get().GitVersion)
 
@@ -122,11 +189,33 @@ func setupSuite() {
 }
 
 var _ = ginkgo.SynchronizedBeforeSuite(func() []byte {
+	ginkgo.By("Clear all helm releases")
+	helmClearCmd := "helm ls --all --short | xargs -n 1 -r helm delete --purge"
+	if err := exec.Command("sh", "-c", helmClearCmd).Run(); err != nil {
+		framework.Failf("failed to clear helm releases (cmd: %q, error: %v", helmClearCmd, err)
+	}
+	ginkgo.By("Clear tidb-operator apiservices")
+	clearAPIServicesCmd := "kubectl delete apiservices -l app.kubernetes.io/name=tidb-operator"
+	if err := exec.Command("sh", "-c", clearAPIServicesCmd).Run(); err != nil {
+		framework.Failf("failed to clear non-kubernetes apiservices (cmd: %q, error: %v", clearAPIServicesCmd, err)
+	}
+	ginkgo.By("Clear tidb-operator validatingwebhookconfigurations")
+	clearValidatingWebhookConfigurationsCmd := "kubectl delete validatingwebhookconfiguration -l app.kubernetes.io/name=tidb-operator"
+	if err := exec.Command("sh", "-c", clearValidatingWebhookConfigurationsCmd).Run(); err != nil {
+		framework.Failf("failed to clear validatingwebhookconfigurations (cmd: %q, error: %v", clearValidatingWebhookConfigurationsCmd, err)
+	}
 	setupSuite()
 	// override with hard-coded value
 	e2econfig.TestConfig.ManifestDir = "/manifests"
 	framework.Logf("====== e2e configuration ======")
 	framework.Logf("%s", e2econfig.TestConfig.MustPrettyPrintJSON())
+	// preload images
+	if e2econfig.TestConfig.PreloadImages {
+		ginkgo.By("Preloading images")
+		if err := utilimage.PreloadImages(); err != nil {
+			framework.Failf("failed to pre-load images: %v", err)
+		}
+	}
 	// Get clients
 	config, err := framework.LoadConfig()
 	framework.ExpectNoError(err, "failed to load config")
@@ -134,13 +223,19 @@ var _ = ginkgo.SynchronizedBeforeSuite(func() []byte {
 	framework.ExpectNoError(err, "failed to create clientset")
 	kubeCli, err := kubernetes.NewForConfig(config)
 	framework.ExpectNoError(err, "failed to create clientset")
+	aggrCli, err := aggregatorclientset.NewForConfig(config)
+	framework.ExpectNoError(err, "failed to create clientset")
+	apiExtCli, err := apiextensionsclientset.NewForConfig(config)
+	framework.ExpectNoError(err, "failed to create clientset")
 	asCli, err := asclientset.NewForConfig(config)
 	framework.ExpectNoError(err, "failed to create clientset")
-	oa := tests.NewOperatorActions(cli, kubeCli, asCli, tests.DefaultPollInterval, e2econfig.TestConfig, nil)
 	ginkgo.By("Recycle all local PVs")
 	pvList, err := kubeCli.CoreV1().PersistentVolumes().List(metav1.ListOptions{})
 	framework.ExpectNoError(err, "failed to list pvList")
 	for _, pv := range pvList.Items {
+		if pv.Spec.StorageClassName != "local-storage" {
+			continue
+		}
 		if pv.Spec.PersistentVolumeReclaimPolicy == v1.PersistentVolumeReclaimDelete {
 			continue
 		}
@@ -149,13 +244,16 @@ var _ = ginkgo.SynchronizedBeforeSuite(func() []byte {
 		_, err = kubeCli.CoreV1().PersistentVolumes().Update(&pv)
 		framework.ExpectNoError(err, fmt.Sprintf("failed to update pv %s", pv.Name))
 	}
-	ginkgo.By("Wait for all PVs to be available")
+	ginkgo.By("Wait for all local PVs to be available")
 	err = wait.Poll(time.Second, time.Minute, func() (bool, error) {
 		pvList, err := kubeCli.CoreV1().PersistentVolumes().List(metav1.ListOptions{})
 		if err != nil {
 			return false, err
 		}
 		for _, pv := range pvList.Items {
+			if pv.Spec.StorageClassName != "local-storage" {
+				continue
+			}
 			if pv.Status.Phase != v1.VolumeAvailable {
 				return false, nil
 			}
@@ -163,15 +261,35 @@ var _ = ginkgo.SynchronizedBeforeSuite(func() []byte {
 		return true, nil
 	})
 	framework.ExpectNoError(err, "failed to wait for all PVs to be available")
-	ginkgo.By("Installing CRDs")
-	oa.CleanCRDOrDie()
-	oa.InstallCRDOrDie()
 	ginkgo.By("Labeling nodes")
+	oa := tests.NewOperatorActions(cli, kubeCli, asCli, aggrCli, apiExtCli, tests.DefaultPollInterval, nil, e2econfig.TestConfig, nil, nil, nil)
 	oa.LabelNodesOrDie()
-	ginkgo.By("Installing tidb-operator")
-	ocfg := e2econfig.NewDefaultOperatorConfig(e2econfig.TestConfig)
-	oa.CleanOperatorOrDie(ocfg)
-	oa.DeployOperatorOrDie(ocfg)
+	if e2econfig.TestConfig.InstallOperator {
+		ocfg := e2econfig.NewDefaultOperatorConfig(e2econfig.TestConfig)
+		ginkgo.By("Installing CRDs")
+		oa.CleanCRDOrDie()
+		oa.InstallCRDOrDie(ocfg)
+		ginkgo.By("Installing tidb-operator")
+		oa.CleanOperatorOrDie(ocfg)
+		oa.DeployOperatorOrDie(ocfg)
+		if e2econfig.TestConfig.OperatorKiller.Enabled {
+			operatorKiller := utiloperator.NewOperatorKiller(e2econfig.TestConfig.OperatorKiller, kubeCli, func() ([]v1.Pod, error) {
+				podList, err := kubeCli.CoreV1().Pods(ocfg.Namespace).List(metav1.ListOptions{
+					LabelSelector: labels.SelectorFromSet(map[string]string{
+						"app.kubernetes.io/name": "tidb-operator",
+					}).String(),
+				})
+				if err != nil {
+					return nil, err
+				}
+				return podList.Items, nil
+			})
+			operatorKillerStopCh := make(chan struct{})
+			go operatorKiller.Run(operatorKillerStopCh)
+		}
+	} else {
+		ginkgo.By("Skip installing tidb-operator")
+	}
 	return nil
 }, func(data []byte) {
 	// Run on all Ginkgo nodes
@@ -182,6 +300,9 @@ var _ = ginkgo.SynchronizedAfterSuite(func() {
 	framework.CleanupSuite()
 }, func() {
 	framework.AfterSuiteActions()
+	if operatorKillerStopCh != nil {
+		close(operatorKillerStopCh)
+	}
 })
 
 // RunE2ETests checks configuration parameters (specified through flags) and then runs
@@ -195,6 +316,11 @@ func RunE2ETests(t *testing.T) {
 	defer logs.FlushLogs()
 
 	gomega.RegisterFailHandler(e2elog.Fail)
+
+	// Disable serial and stability tests by default unless they are explicitly requested.
+	if config.GinkgoConfig.FocusString == "" && config.GinkgoConfig.SkipString == "" {
+		config.GinkgoConfig.SkipString = `\[Stability\]|\[Serial\]`
+	}
 
 	// Run tests through the Ginkgo runner with output to console + JUnit for Jenkins
 	var r []ginkgo.Reporter

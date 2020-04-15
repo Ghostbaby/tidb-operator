@@ -18,13 +18,14 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/pingcap/advanced-statefulset/pkg/apis/apps/v1/helper"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/controller"
 	"github.com/pingcap/tidb-operator/pkg/pdapi"
 	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	corelisters "k8s.io/client-go/listers/core/v1"
-	glog "k8s.io/klog"
+	"k8s.io/klog"
 )
 
 const (
@@ -68,7 +69,7 @@ func (tku *tikvUpgrader) Upgrade(tc *v1alpha1.TidbCluster, oldSet *apps.Stateful
 	}
 
 	tc.Status.TiKV.Phase = v1alpha1.UpgradePhase
-	if !templateEqual(newSet.Spec.Template, oldSet.Spec.Template) {
+	if !templateEqual(newSet, oldSet) {
 		return nil
 	}
 
@@ -82,12 +83,19 @@ func (tku *tikvUpgrader) Upgrade(tc *v1alpha1.TidbCluster, oldSet *apps.Stateful
 		// If we encounter this situation, we will let the native statefulset controller do the upgrade completely, which may be unsafe for upgrading tikv.
 		// Therefore, in the production environment, we should try to avoid modifying the tikv statefulset update strategy directly.
 		newSet.Spec.UpdateStrategy = oldSet.Spec.UpdateStrategy
-		glog.Warningf("tidbcluster: [%s/%s] tikv statefulset %s UpdateStrategy has been modified manually", ns, tcName, oldSet.GetName())
+		klog.Warningf("tidbcluster: [%s/%s] tikv statefulset %s UpdateStrategy has been modified manually", ns, tcName, oldSet.GetName())
+		return nil
+	}
+
+	if controller.PodWebhookEnabled {
+		setUpgradePartition(newSet, 0)
 		return nil
 	}
 
 	setUpgradePartition(newSet, *oldSet.Spec.UpdateStrategy.RollingUpdate.Partition)
-	for i := tc.TiKVStsActualReplicas() - 1; i >= 0; i-- {
+	podOrdinals := helper.GetPodOrdinals(*oldSet.Spec.Replicas, oldSet).List()
+	for _i := len(podOrdinals) - 1; _i >= 0; _i-- {
+		i := podOrdinals[_i]
 		store := tku.getStoreByOrdinal(tc, i)
 		if store == nil {
 			continue
@@ -163,7 +171,7 @@ func (tku *tikvUpgrader) readyToUpgrade(upgradePod *corev1.Pod, store v1alpha1.T
 	if evictLeaderBeginTimeStr, evicting := upgradePod.Annotations[EvictLeaderBeginTime]; evicting {
 		evictLeaderBeginTime, err := time.Parse(time.RFC3339, evictLeaderBeginTimeStr)
 		if err != nil {
-			glog.Errorf("parse annotation:[%s] to time failed.", EvictLeaderBeginTime)
+			klog.Errorf("parse annotation:[%s] to time failed.", EvictLeaderBeginTime)
 			return false
 		}
 		if time.Now().After(evictLeaderBeginTime.Add(EvictLeaderTimeout)) {
@@ -178,11 +186,11 @@ func (tku *tikvUpgrader) beginEvictLeader(tc *v1alpha1.TidbCluster, storeID uint
 	podName := pod.GetName()
 	err := controller.GetPDClient(tku.pdControl, tc).BeginEvictLeader(storeID)
 	if err != nil {
-		glog.Errorf("tikv upgrader: failed to begin evict leader: %d, %s/%s, %v",
+		klog.Errorf("tikv upgrader: failed to begin evict leader: %d, %s/%s, %v",
 			storeID, ns, podName, err)
 		return err
 	}
-	glog.Infof("tikv upgrader: begin evict leader: %d, %s/%s successfully", storeID, ns, podName)
+	klog.Infof("tikv upgrader: begin evict leader: %d, %s/%s successfully", storeID, ns, podName)
 	if pod.Annotations == nil {
 		pod.Annotations = map[string]string{}
 	}
@@ -190,11 +198,11 @@ func (tku *tikvUpgrader) beginEvictLeader(tc *v1alpha1.TidbCluster, storeID uint
 	pod.Annotations[EvictLeaderBeginTime] = now
 	_, err = tku.podControl.UpdatePod(tc, pod)
 	if err != nil {
-		glog.Errorf("tikv upgrader: failed to set pod %s/%s annotation %s to %s, %v",
+		klog.Errorf("tikv upgrader: failed to set pod %s/%s annotation %s to %s, %v",
 			ns, podName, EvictLeaderBeginTime, now, err)
 		return err
 	}
-	glog.Infof("tikv upgrader: set pod %s/%s annotation %s to %s successfully",
+	klog.Infof("tikv upgrader: set pod %s/%s annotation %s to %s successfully",
 		ns, podName, EvictLeaderBeginTime, now)
 	return nil
 }
@@ -210,12 +218,12 @@ func (tku *tikvUpgrader) endEvictLeader(tc *v1alpha1.TidbCluster, ordinal int32)
 		return err
 	}
 
-	err = tku.pdControl.GetPDClient(pdapi.Namespace(tc.GetNamespace()), tc.GetName(), tc.Spec.EnableTLSCluster).EndEvictLeader(storeID)
+	err = tku.pdControl.GetPDClient(pdapi.Namespace(tc.GetNamespace()), tc.GetName(), tc.IsTLSClusterEnabled()).EndEvictLeader(storeID)
 	if err != nil {
-		glog.Errorf("tikv upgrader: failed to end evict leader storeID: %d ordinal: %d, %v", storeID, ordinal, err)
+		klog.Errorf("tikv upgrader: failed to end evict leader storeID: %d ordinal: %d, %v", storeID, ordinal, err)
 		return err
 	}
-	glog.Infof("tikv upgrader: end evict leader storeID: %d ordinal: %d successfully", storeID, ordinal)
+	klog.Infof("tikv upgrader: end evict leader storeID: %d ordinal: %d successfully", storeID, ordinal)
 	return nil
 }
 

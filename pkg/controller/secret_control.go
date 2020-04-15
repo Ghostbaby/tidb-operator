@@ -22,11 +22,11 @@ import (
 	"github.com/pingcap/tidb-operator/pkg/label"
 	certutil "github.com/pingcap/tidb-operator/pkg/util/crypto"
 	corev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	types "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
-	corelisters "k8s.io/client-go/listers/core/v1"
-	glog "k8s.io/klog"
+	"k8s.io/klog"
 )
 
 // SecretControlInterface manages certificates used by TiDB clusters
@@ -37,18 +37,15 @@ type SecretControlInterface interface {
 }
 
 type realSecretControl struct {
-	kubeCli      kubernetes.Interface
-	secretLister corelisters.SecretLister
+	kubeCli kubernetes.Interface
 }
 
 // NewRealSecretControl creates a new SecretControlInterface
 func NewRealSecretControl(
 	kubeCli kubernetes.Interface,
-	secretLister corelisters.SecretLister,
 ) SecretControlInterface {
 	return &realSecretControl{
-		kubeCli:      kubeCli,
-		secretLister: secretLister,
+		kubeCli: kubeCli,
 	}
 }
 
@@ -65,50 +62,51 @@ func (rsc *realSecretControl) Create(or metav1.OwnerReference, certOpts *TiDBClu
 			OwnerReferences: []metav1.OwnerReference{or},
 		},
 		Data: map[string][]byte{
-			"cert": cert,
-			"key":  key,
+			v1.TLSCertKey:       cert,
+			v1.TLSPrivateKeyKey: key,
 		},
+		Type: v1.SecretTypeTLS,
 	}
 
 	_, err := rsc.kubeCli.CoreV1().Secrets(certOpts.Namespace).Create(secret)
 	if err == nil {
-		glog.Infof("save cert to secret %s/%s", certOpts.Namespace, secretName)
+		klog.Infof("save cert to secret %s/%s", certOpts.Namespace, secretName)
 	}
 	return err
 }
 
 // Load loads cert and key from Secret matching the name
 func (rsc *realSecretControl) Load(ns string, secretName string) ([]byte, []byte, error) {
-	secret, err := rsc.secretLister.Secrets(ns).Get(secretName)
+	secret, err := rsc.kubeCli.CoreV1().Secrets(ns).Get(secretName, metav1.GetOptions{})
 	if err != nil {
 		return nil, nil, err
 	}
 
-	return secret.Data["cert"], secret.Data["key"], nil
+	return secret.Data[v1.TLSCertKey], secret.Data[v1.TLSPrivateKeyKey], nil
 }
 
 // Check returns true if the secret already exist
 func (rsc *realSecretControl) Check(ns string, secretName string) bool {
 	certBytes, keyBytes, err := rsc.Load(ns, secretName)
 	if err != nil {
-		glog.Errorf("certificate validation failed for [%s/%s], error loading cert from secret, %v", ns, secretName, err)
+		klog.Errorf("certificate validation failed for [%s/%s], error loading cert from secret, %v", ns, secretName, err)
 		return false
 	}
 
 	// validate if the certificate is valid
 	block, _ := pem.Decode(certBytes)
 	if block == nil {
-		glog.Errorf("certificate validation failed for [%s/%s], can not decode cert to PEM", ns, secretName)
+		klog.Errorf("certificate validation failed for [%s/%s], can not decode cert to PEM", ns, secretName)
 		return false
 	}
 	cert, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
-		glog.Errorf("certificate validation failed for [%s/%s], can not parse cert, %v", ns, secretName, err)
+		klog.Errorf("certificate validation failed for [%s/%s], can not parse cert, %v", ns, secretName, err)
 		return false
 	}
 	rootCAs, err := certutil.ReadCACerts()
 	if err != nil {
-		glog.Errorf("certificate validation failed for [%s/%s], error loading CAs, %v", ns, secretName, err)
+		klog.Errorf("certificate validation failed for [%s/%s], error loading CAs, %v", ns, secretName, err)
 		return false
 	}
 
@@ -121,14 +119,14 @@ func (rsc *realSecretControl) Check(ns string, secretName string) bool {
 	}
 	_, err = cert.Verify(verifyOpts)
 	if err != nil {
-		glog.Errorf("certificate validation failed for [%s/%s], %v", ns, secretName, err)
+		klog.Errorf("certificate validation failed for [%s/%s], %v", ns, secretName, err)
 		return false
 	}
 
 	// validate if the certificate and private key matches
 	_, err = tls.X509KeyPair(certBytes, keyBytes)
 	if err != nil {
-		glog.Errorf("certificate validation failed for [%s/%s], error loading key pair, %v", ns, secretName, err)
+		klog.Errorf("certificate validation failed for [%s/%s], error loading key pair, %v", ns, secretName, err)
 		return false
 	}
 
@@ -143,10 +141,8 @@ type FakeSecretControl struct {
 
 func NewFakeSecretControl(
 	kubeCli kubernetes.Interface,
-	secretLister corelisters.SecretLister,
 ) SecretControlInterface {
 	return &realSecretControl{
-		kubeCli:      kubeCli,
-		secretLister: secretLister,
+		kubeCli: kubeCli,
 	}
 }

@@ -9,11 +9,11 @@ variable "tidb_operator_id" {
 variable "cluster_name" {}
 variable "cluster_version" {
   description = "The TiDB cluster version"
-  default     = "v3.0.5"
+  default     = "v3.0.8"
 }
 variable "tidb_cluster_chart_version" {
   description = "The TiDB cluster chart version"
-  default     = "v1.0.5"
+  default     = "v1.0.6"
 }
 variable "override_values" {
   description = "YAML formatted values that will be passed in to the tidb-cluster helm release"
@@ -71,4 +71,9 @@ variable "tikv_image_type" {
 variable "tikv_local_ssd_count" {
   description = "TiKV node pool local ssd count (cannot be changed after the node pool is created)"
   default     = 1
+}
+
+variable "create_tidb_cluster_release" {
+  description = "Whether create tidb-cluster release in the node pools automatically"
+  default     = true
 }

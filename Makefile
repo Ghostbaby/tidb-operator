@@ -39,6 +39,7 @@ else
 docker: build
 endif
 	docker build --tag "${DOCKER_REGISTRY}/pingcap/tidb-operator:${IMAGE_TAG}" images/tidb-operator
+	docker build --tag "${DOCKER_REGISTRY}/pingcap/tidb-backup-manager:${IMAGE_TAG}" images/tidb-backup-manager
 
 build: controller-manager scheduler discovery admission-webhook apiserver backup-manager
 
@@ -58,7 +59,7 @@ apiserver:
 	$(GO_BUILD) -ldflags '$(LDFLAGS)' -o images/tidb-operator/bin/tidb-apiserver cmd/apiserver/main.go
 
 backup-manager:
-	$(GO_BUILD) -ldflags '$(LDFLAGS)' -o images/backup-manager/bin/tidb-backup-manager cmd/backup-manager/main.go
+	$(GO_BUILD) -ldflags '$(LDFLAGS)' -o images/tidb-backup-manager/bin/tidb-backup-manager cmd/backup-manager/main.go
 
 ifeq ($(NO_BUILD),y)
 backup-docker:
@@ -66,9 +67,9 @@ backup-docker:
 else
 backup-docker: backup-manager
 endif
-	docker build --tag "${DOCKER_REGISTRY}/pingcap/tidb-backup-manager:${IMAGE_TAG}" images/backup-manager
+	docker build --tag "${DOCKER_REGISTRY}/pingcap/tidb-backup-manager:${IMAGE_TAG}" images/tidb-backup-manager
 
-e2e-docker-push: e2e-docker test-apiserver-dokcer-push
+e2e-docker-push: e2e-docker
 	docker push "${DOCKER_REGISTRY}/pingcap/tidb-operator-e2e:${IMAGE_TAG}"
 
 ifeq ($(NO_BUILD),y)
@@ -87,29 +88,22 @@ endif
 	cp -r manifests tests/images/e2e
 	docker build -t "${DOCKER_REGISTRY}/pingcap/tidb-operator-e2e:${IMAGE_TAG}" tests/images/e2e
 
-e2e-build: test-apiserver-build
+e2e-build:
 	$(GO_BUILD) -ldflags '$(LDFLAGS)' -o tests/images/e2e/bin/ginkgo github.com/onsi/ginkgo/ginkgo
 	$(GO) test -c -ldflags '$(LDFLAGS)' -o tests/images/e2e/bin/e2e.test ./tests/e2e
-
-test-apiserver-dokcer-push: test-apiesrver-docker
-	docker push "${DOCKER_REGISTRY}/pingcap/test-apiserver:${IMAGE_TAG}"
-
-ifeq ($(NO_BUILD),y)
-test-apiesrver-docker:
-	@echo "NO_BUILD=y, skip build for $@"
-else
-test-apiesrver-docker: test-apiserver-build
-endif
-	docker build -t "${DOCKER_REGISTRY}/pingcap/test-apiserver:${IMAGE_TAG}" tests/images/test-apiserver
-
-test-apiserver-build:
-	$(GO_BUILD) -ldflags '$(LDFLAGS)' -o tests/images/test-apiserver/bin/tidb-apiserver tests/cmd/apiserver/main.go
+	$(GO_BUILD) -ldflags '$(LDFLAGS)' -o tests/images/e2e/bin/webhook ./tests/cmd/webhook
+	$(GO_BUILD) -ldflags '$(LDFLAGS)' -o tests/images/e2e/bin/blockwriter ./tests/cmd/blockwriter
+	$(GO_BUILD) -ldflags '$(LDFLAGS)' -o tests/images/e2e/bin/apiserver ./tests/cmd/apiserver
 
 e2e:
 	./hack/e2e.sh
 
+e2e-examples:
+	./hack/e2e-examples.sh
+
 stability-test-build:
-	$(GO_BUILD) -ldflags '$(LDFLAGS)' -o tests/images/stability-test/bin/stability-test tests/cmd/stability/*.go
+	$(GO_BUILD) -ldflags '$(LDFLAGS)' -o tests/images/stability-test/bin/blockwriter ./tests/cmd/blockwriter
+	$(GO_BUILD) -ldflags '$(LDFLAGS)' -o tests/images/stability-test/bin/stability-test ./tests/cmd/stability
 
 stability-test-docker: stability-test-build
 	docker build -t "${DOCKER_REGISTRY}/pingcap/tidb-operator-stability-test:${IMAGE_TAG}" tests/images/stability-test
@@ -143,7 +137,7 @@ check-setup:
 	@which retool >/dev/null 2>&1 || GO111MODULE=off go get github.com/twitchtv/retool
 	@GO111MODULE=off retool sync
 
-check: check-setup lint tidy check-static check-codegen check-terraform
+check: check-setup lint tidy check-static check-codegen check-terraform check-boilerplate check-openapi-spec check-crd-groups
 
 check-static:
 	@ # Not running vet and fmt through metalinter becauase it ends up looking at vendor
@@ -156,6 +150,8 @@ check-static:
 	  --enable misspell \
 	  --enable ineffassign \
 	  $$($(PACKAGE_DIRECTORIES))
+	@echo "end-of-file checking"
+	./hack/check-EOF.sh
 
 check-codegen:
 	./hack/verify-codegen.sh
@@ -163,6 +159,15 @@ check-codegen:
 check-terraform:
 	./hack/check-terraform.sh
 	git diff --quiet deploy
+
+check-boilerplate:
+	./hack/verify-boilerplate.sh
+
+check-openapi-spec:
+	./hack/verify-openapi-spec.sh
+
+check-crd-groups:
+	./hack/verify-crd-groups.sh
 
 # TODO: staticcheck is too slow currently
 staticcheck:

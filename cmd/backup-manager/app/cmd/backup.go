@@ -16,8 +16,6 @@ package cmd
 import (
 	"context"
 
-	// registry mysql drive
-	_ "github.com/go-sql-driver/mysql"
 	"github.com/pingcap/tidb-operator/cmd/backup-manager/app/backup"
 	"github.com/pingcap/tidb-operator/cmd/backup-manager/app/constants"
 	"github.com/pingcap/tidb-operator/cmd/backup-manager/app/util"
@@ -25,13 +23,13 @@ import (
 	"github.com/pingcap/tidb-operator/pkg/controller"
 	"github.com/spf13/cobra"
 	"k8s.io/client-go/tools/cache"
-	glog "k8s.io/klog"
+	"k8s.io/klog"
 	cmdutil "k8s.io/kubectl/pkg/cmd/util"
 )
 
 // NewBackupCommand implements the backup command
 func NewBackupCommand() *cobra.Command {
-	bo := backup.BackupOpts{}
+	bo := backup.Options{}
 
 	cmd := &cobra.Command{
 		Use:   "backup",
@@ -42,17 +40,14 @@ func NewBackupCommand() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVarP(&bo.Namespace, "namespace", "n", "", "Tidb cluster's namespace")
-	cmd.Flags().StringVarP(&bo.TcName, "tidbcluster", "t", "", "Tidb cluster name")
-	cmd.Flags().StringVarP(&bo.TidbSvc, "tidbservice", "s", "", "Tidb cluster access service address")
-	cmd.Flags().StringVarP(&bo.Password, "password", "p", "", "Password to use when connecting to tidb cluster")
-	cmd.Flags().StringVarP(&bo.User, "user", "u", "", "User for login tidb cluster")
-	cmd.Flags().StringVarP(&bo.StorageType, "storageType", "S", "", "Backend storage type")
-	cmd.Flags().StringVarP(&bo.BackupName, "backupName", "b", "", "Backup CRD object name")
+	cmd.Flags().StringVar(&bo.Namespace, "namespace", "", "Backup CR's namespace")
+	cmd.Flags().StringVar(&bo.ResourceName, "backupName", "", "Backup CRD object name")
+	cmd.Flags().BoolVar(&bo.TLSClient, "client-tls", false, "Whether client tls is enabled")
+	cmd.Flags().BoolVar(&bo.TLSCluster, "cluster-tls", false, "Whether cluster tls is enabled")
 	return cmd
 }
 
-func runBackup(backupOpts backup.BackupOpts, kubecfg string) error {
+func runBackup(backupOpts backup.Options, kubecfg string) error {
 	kubeCli, cli, err := util.NewKubeAndCRCli(kubecfg)
 	cmdutil.CheckErr(err)
 	options := []informers.SharedInformerOption{
@@ -70,7 +65,7 @@ func runBackup(backupOpts backup.BackupOpts, kubecfg string) error {
 	// waiting for the shared informer's store has synced.
 	cache.WaitForCacheSync(ctx.Done(), backupInformer.Informer().HasSynced)
 
-	glog.Infof("start to process backup %s", backupOpts)
-	bm := backup.NewBackupManager(backupInformer.Lister(), statusUpdater, backupOpts)
+	klog.Infof("start to process backup %s", backupOpts.String())
+	bm := backup.NewManager(backupInformer.Lister(), statusUpdater, backupOpts)
 	return bm.ProcessBackup()
 }

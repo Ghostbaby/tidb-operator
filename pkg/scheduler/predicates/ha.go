@@ -31,9 +31,8 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
-	glog "k8s.io/klog"
+	"k8s.io/klog"
 )
 
 type ha struct {
@@ -47,15 +46,13 @@ type ha struct {
 	pvcListFn     func(ns, instanceName, component string) (*apiv1.PersistentVolumeClaimList, error)
 	updatePVCFn   func(*apiv1.PersistentVolumeClaim) error
 	acquireLockFn func(*apiv1.Pod) (*apiv1.PersistentVolumeClaim, *apiv1.PersistentVolumeClaim, error)
-	recorder      record.EventRecorder
 }
 
 // NewHA returns a Predicate
-func NewHA(kubeCli kubernetes.Interface, cli versioned.Interface, recorder record.EventRecorder) Predicate {
+func NewHA(kubeCli kubernetes.Interface, cli versioned.Interface) Predicate {
 	h := &ha{
-		kubeCli:  kubeCli,
-		cli:      cli,
-		recorder: recorder,
+		kubeCli: kubeCli,
+		cli:     cli,
 	}
 	h.podListFn = h.realPodListFn
 	h.podGetFn = h.realPodGetFn
@@ -68,7 +65,7 @@ func NewHA(kubeCli kubernetes.Interface, cli versioned.Interface, recorder recor
 }
 
 func (h *ha) Name() string {
-	return "HighAvailability"
+	return "HAScheduling"
 }
 
 // 1. return the node to kube-scheduler if there is only one feasible node and the pod's pvc is bound
@@ -90,12 +87,12 @@ func (h *ha) Filter(instanceName string, pod *apiv1.Pod, nodes []apiv1.Node) ([]
 	tcName := getTCNameFromPod(pod, component)
 
 	if component != label.PDLabelVal && component != label.TiKVLabelVal {
-		glog.V(4).Infof("component %s is ignored in HA predicate", component)
+		klog.V(4).Infof("component %s is ignored in HA predicate", component)
 		return nodes, nil
 	}
 
 	if len(nodes) == 0 {
-		return nil, fmt.Errorf("kube nodes is empty")
+		return nil, fmt.Errorf("no nodes available to schedule pods %s/%s", ns, podName)
 	}
 	if _, _, err := h.acquireLockFn(pod); err != nil {
 		return nil, err
@@ -121,7 +118,7 @@ func (h *ha) Filter(instanceName string, pod *apiv1.Pod, nodes []apiv1.Node) ([]
 		return nil, err
 	}
 	replicas := getReplicasFrom(tc, component)
-	glog.Infof("ha: tidbcluster %s/%s component %s replicas %d", ns, tcName, component, replicas)
+	klog.Infof("ha: tidbcluster %s/%s component %s replicas %d", ns, tcName, component, replicas)
 
 	allNodes := make(sets.String)
 	nodeMap := make(map[string][]string)
@@ -140,62 +137,63 @@ func (h *ha) Filter(instanceName string, pod *apiv1.Pod, nodes []apiv1.Node) ([]
 
 		nodeMap[nodeName] = append(nodeMap[nodeName], pName)
 	}
-	glog.V(4).Infof("nodeMap: %+v", nodeMap)
+	klog.V(4).Infof("nodeMap: %+v", nodeMap)
 
 	min := -1
 	minNodeNames := make([]string, 0)
-	for nodeName, podNames := range nodeMap {
-		podsCount := len(podNames)
-		maxPodsPerNode := 0
+	maxPodsPerNode := 0
 
-		if component == label.PDLabelVal {
+	if component == label.PDLabelVal {
+		/**
+		 * replicas     maxPodsPerNode
+		 * ---------------------------
+		 * 1            1
+		 * 2            1
+		 * 3            1
+		 * 4            1
+		 * 5            2
+		 * ...
+		 */
+		maxPodsPerNode = int((replicas+1)/2) - 1
+		if maxPodsPerNode <= 0 {
+			maxPodsPerNode = 1
+		}
+	} else {
+		// 1. TiKV instances must run on at least 3 nodes, otherwise HA is not possible
+		if allNodes.Len() < 3 {
+			maxPodsPerNode = 1
+		} else {
 			/**
-			 * replicas     maxPodsPerNode
-			 * ---------------------------
-			 * 1            1
-			 * 2            1
-			 * 3            1
-			 * 4            1
-			 * 5            2
+			 * 2. we requires TiKV instances to run on at least 3 nodes, so max
+			 * allowed pods on each node is ceil(replicas / 3)
+			 *
+			 * replicas     maxPodsPerNode   best HA on three nodes
+			 * ---------------------------------------------------
+			 * 3            1                1, 1, 1
+			 * 4            2                1, 1, 2
+			 * 5            2                1, 2, 2
+			 * 6            2                2, 2, 2
+			 * 7            3                2, 2, 3
+			 * 8            3                2, 3, 3
 			 * ...
 			 */
-			maxPodsPerNode = int((replicas+1)/2) - 1
-			if maxPodsPerNode <= 0 {
-				maxPodsPerNode = 1
-			}
-		} else {
-			// replicas less than 3 cannot achieve high availability
-			if replicas < 3 {
-				minNodeNames = append(minNodeNames, nodeName)
-				glog.Infof("replicas is %d, add node %s to minNodeNames", replicas, nodeName)
-				continue
-			}
+			maxPodsPerNode = int(math.Ceil(float64(replicas) / 3))
+		}
+	}
 
-			// 1. TiKV instances must run on at least 3 nodes, otherwise HA is not possible
-			if allNodes.Len() < 3 {
-				maxPodsPerNode = 1
-			} else {
-				/**
-				 * 2. we requires TiKV instances to run on at least 3 nodes, so max
-				 * allowed pods on each node is ceil(replicas / 3)
-				 *
-				 * replicas     maxPodsPerNode   best HA on three nodes
-				 * ---------------------------------------------------
-				 * 3            1                1, 1, 1
-				 * 4            2                1, 1, 2
-				 * 5            2                1, 2, 2
-				 * 6            2                2, 2, 2
-				 * 7            3                2, 2, 3
-				 * 8            3                2, 3, 3
-				 * ...
-				 */
-				maxPodsPerNode = int(math.Ceil(float64(replicas) / 3))
-			}
+	for nodeName, podNames := range nodeMap {
+		podsCount := len(podNames)
+
+		// tikv replicas less than 3 cannot achieve high availability
+		if component == label.TiKVLabelVal && replicas < 3 {
+			minNodeNames = append(minNodeNames, nodeName)
+			klog.Infof("replicas is %d, add node %s to minNodeNames", replicas, nodeName)
+			continue
 		}
 
 		if podsCount+1 > maxPodsPerNode {
 			// pods on this node exceeds the limit, skip
-			glog.Infof("node %s has %d instances of component %s, max allowed is %d, skipping",
+			klog.Infof("node %s has %d instances of component %s, max allowed is %d, skipping",
 				nodeName, podsCount, component, maxPodsPerNode)
 			continue
 		}
@@ -205,7 +203,7 @@ func (h *ha) Filter(instanceName string, pod *apiv1.Pod, nodes []apiv1.Node) ([]
 			min = podsCount
 		}
 		if podsCount > min {
-			glog.Infof("node %s podsCount %d > min %d, skipping", nodeName, podsCount, min)
+			klog.Infof("node %s podsCount %d > min %d, skipping", nodeName, podsCount, min)
 			continue
 		}
 		if podsCount < min {
@@ -216,10 +214,18 @@ func (h *ha) Filter(instanceName string, pod *apiv1.Pod, nodes []apiv1.Node) ([]
 	}
 
 	if len(minNodeNames) == 0 {
-		msg := fmt.Sprintf("can't schedule to nodes: %v, because these pods had been scheduled to nodes: %v", GetNodeNames(nodes), nodeMap)
-		glog.Info(msg)
-		h.recorder.Event(pod, apiv1.EventTypeWarning, "FailedScheduling", msg)
-		return nil, errors.New(msg)
+		nodesStrArr := []string{}
+		for nodeName, podNameArr := range nodeMap {
+			s := fmt.Sprintf("%s (%d %s pods)",
+				nodeName, len(podNameArr), strings.ToLower(component))
+			nodesStrArr = append(nodesStrArr, s)
+		}
+		sort.Strings(nodesStrArr)
+
+		// example: unable to schedule to nodes: kube-node-1 (1 pd pods), kube-node-2 (1 pd pods), max pods per node: 1
+		errMsg := fmt.Sprintf("unable to schedule to nodes: %s, max pods per node: %d",
+			strings.Join(nodesStrArr, ", "), maxPodsPerNode)
+		return nil, errors.New(errMsg)
 	}
 	return getNodeFromNames(nodes, minNodeNames), nil
 }
@@ -276,11 +282,11 @@ func (h *ha) realAcquireLock(pod *apiv1.Pod) (*apiv1.PersistentVolumeClaim, *api
 	delete(schedulingPVC.Annotations, label.AnnPVCPodScheduling)
 	err = h.updatePVCFn(schedulingPVC)
 	if err != nil {
-		glog.Errorf("ha: failed to delete pvc %s/%s annotation %s, %v",
+		klog.Errorf("ha: failed to delete pvc %s/%s annotation %s, %v",
 			ns, schedulingPVC.GetName(), label.AnnPVCPodScheduling, err)
 		return schedulingPVC, currentPVC, err
 	}
-	glog.Infof("ha: delete pvc %s/%s annotation %s successfully",
+	klog.Infof("ha: delete pvc %s/%s annotation %s successfully",
 		ns, schedulingPVC.GetName(), label.AnnPVCPodScheduling)
 	return schedulingPVC, currentPVC, h.setCurrentPodScheduling(currentPVC)
 }
@@ -313,10 +319,10 @@ func (h *ha) realUpdatePVCFn(pvc *apiv1.PersistentVolumeClaim) error {
 	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		_, updateErr := h.kubeCli.CoreV1().PersistentVolumeClaims(ns).Update(pvc)
 		if updateErr == nil {
-			glog.Infof("update PVC: [%s/%s] successfully, TidbCluster: %s", ns, pvcName, tcName)
+			klog.Infof("update PVC: [%s/%s] successfully, TidbCluster: %s", ns, pvcName, tcName)
 			return nil
 		}
-		glog.Errorf("failed to update PVC: [%s/%s], TidbCluster: %s, error: %v", ns, pvcName, tcName, updateErr)
+		klog.Errorf("failed to update PVC: [%s/%s], TidbCluster: %s, error: %v", ns, pvcName, tcName, updateErr)
 
 		if updated, err := h.pvcGetFn(ns, pvcName); err == nil {
 			// make a copy so we don't mutate the shared cache
@@ -349,11 +355,11 @@ func (h *ha) setCurrentPodScheduling(pvc *apiv1.PersistentVolumeClaim) error {
 	pvc.Annotations[label.AnnPVCPodScheduling] = now
 	err := h.updatePVCFn(pvc)
 	if err != nil {
-		glog.Errorf("ha: failed to set pvc %s/%s annotation %s to %s, %v",
+		klog.Errorf("ha: failed to set pvc %s/%s annotation %s to %s, %v",
 			ns, pvcName, label.AnnPVCPodScheduling, now, err)
 		return err
 	}
-	glog.Infof("ha: set pvc %s/%s annotation %s to %s successfully",
+	klog.Infof("ha: set pvc %s/%s annotation %s to %s successfully",
 		ns, pvcName, label.AnnPVCPodScheduling, now)
 	return nil
 }

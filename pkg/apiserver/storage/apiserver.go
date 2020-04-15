@@ -1,4 +1,4 @@
-// Copyright 2019. PingCAP, Inc.
+// Copyright 2019 PingCAP, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,7 +21,7 @@ import (
 	"k8s.io/apiserver/pkg/registry/generic"
 	"k8s.io/apiserver/pkg/storage/storagebackend/factory"
 	"k8s.io/client-go/rest"
-	glog "k8s.io/klog"
+	"k8s.io/klog"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apiserver/pkg/storage"
@@ -59,7 +59,7 @@ func (f *ApiServerRestOptionsFactory) newApiServerStorageDecorator() generic.Sto
 	) (storage.Interface, factory.DestroyFunc, error) {
 		cli, err := versioned.NewForConfig(f.RestConfig)
 		if err != nil {
-			glog.Fatalf("failed to create Clientset: %v", err)
+			klog.Fatalf("failed to create Clientset: %v", err)
 		}
 		objectType := newFunc()
 		return NewApiServerStore(cli, f.Codec, f.StorageNamespace, objectType, newListFunc)

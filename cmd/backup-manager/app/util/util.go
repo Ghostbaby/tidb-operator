@@ -21,6 +21,8 @@ import (
 
 	"github.com/spf13/pflag"
 	cmdutil "k8s.io/kubectl/pkg/cmd/util"
+
+	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 )
 
 var (
@@ -94,4 +96,69 @@ func IsDirExist(path string) bool {
 // NormalizeBucketURI normal bucket URL for rclone, e.g. s3://bucket -> s3:bucket
 func NormalizeBucketURI(bucket string) string {
 	return strings.Replace(bucket, "://", ":", 1)
+}
+
+// GetOptionValueFromEnv get option's value from environment variable. If unset, return empty string.
+func GetOptionValueFromEnv(option, envPrefix string) string {
+	envVar := envPrefix + "_" + strings.Replace(strings.ToUpper(option), "-", "_", -1)
+	return os.Getenv(envVar)
+}
+
+// ConstructBRGlobalOptionsForBackup constructs BR global options for backup and also return the remote path.
+func ConstructBRGlobalOptionsForBackup(backup *v1alpha1.Backup) ([]string, string, error) {
+	var args []string
+	config := backup.Spec.BR
+	if config == nil {
+		return nil, "", fmt.Errorf("no config for br in backup %s/%s", backup.Namespace, backup.Name)
+	}
+	args = append(args, constructBRGlobalOptions(config)...)
+	storageArgs, remotePath, err := getRemoteStorage(backup.Spec.StorageProvider)
+	if err != nil {
+		return nil, "", err
+	}
+	args = append(args, storageArgs...)
+	if (backup.Spec.Type == v1alpha1.BackupTypeDB || backup.Spec.Type == v1alpha1.BackupTypeTable) && config.DB != "" {
+		args = append(args, fmt.Sprintf("--db=%s", config.DB))
+	}
+	if backup.Spec.Type == v1alpha1.BackupTypeTable && config.Table != "" {
+		args = append(args, fmt.Sprintf("--table=%s", config.Table))
+	}
+	return args, remotePath, nil
+}
+
+// ConstructBRGlobalOptionsForRestore constructs BR global options for restore.
+func ConstructBRGlobalOptionsForRestore(restore *v1alpha1.Restore) ([]string, error) {
+	var args []string
+	config := restore.Spec.BR
+	if config == nil {
+		return nil, fmt.Errorf("no config for br in restore %s/%s", restore.Namespace, restore.Name)
+	}
+	args = append(args, constructBRGlobalOptions(config)...)
+	storageArgs, _, err := getRemoteStorage(restore.Spec.StorageProvider)
+	if err != nil {
+		return nil, err
+	}
+	args = append(args, storageArgs...)
+	if (restore.Spec.Type == v1alpha1.BackupTypeDB || restore.Spec.Type == v1alpha1.BackupTypeTable) && config.DB != "" {
+		args = append(args, fmt.Sprintf("--db=%s", config.DB))
+	}
+	if restore.Spec.Type == v1alpha1.BackupTypeTable && config.Table != "" {
+		args = append(args, fmt.Sprintf("--table=%s", config.Table))
+	}
+	return args, nil
+}
+
+// constructBRGlobalOptions constructs BR basic global options.
+func constructBRGlobalOptions(config *v1alpha1.BRConfig) []string {
+	var args []string
+	if config.LogLevel != "" {
+		args = append(args, fmt.Sprintf("--log-level=%s", config.LogLevel))
+	}
+	if config.StatusAddr != "" {
+		args = append(args, fmt.Sprintf("--status-addr=%s", config.StatusAddr))
+	}
+	if config.SendCredToTikv != nil {
+		args = append(args, fmt.Sprintf("--send-credentials-to-tikv=%t", *config.SendCredToTikv))
+	}
+	return args
 }

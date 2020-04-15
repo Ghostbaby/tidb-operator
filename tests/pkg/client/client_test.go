@@ -1,3 +1,16 @@
+// Copyright 2019 PingCAP, Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package client
 
 import (
@@ -5,7 +18,7 @@ import (
 
 	fclient "github.com/pingcap/tidb-operator/tests/pkg/fault-trigger/client"
 	"github.com/pingcap/tidb-operator/tests/pkg/fault-trigger/manager"
-	glog "k8s.io/klog"
+	"k8s.io/klog"
 )
 
 func TestClientConn(t *testing.T) {
@@ -16,6 +29,6 @@ func TestClientConn(t *testing.T) {
 	if err := faultCli.StopVM(&manager.VM{
 		Name: "105",
 	}); err != nil {
-		glog.Errorf("failed to start node on physical node %v", err)
+		klog.Errorf("failed to start node on physical node %v", err)
 	}
 }

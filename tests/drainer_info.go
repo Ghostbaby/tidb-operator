@@ -1,4 +1,4 @@
-// Copyright 2019. PingCAP, Inc.
+// Copyright 2019 PingCAP, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,7 +18,7 @@ import (
 	"io/ioutil"
 	"strings"
 
-	glog "k8s.io/klog"
+	"k8s.io/klog"
 )
 
 type DbType string
@@ -72,6 +72,6 @@ func (d *DrainerConfig) BuildSubValues(dir string) (string, error) {
 	if err := ioutil.WriteFile(path, []byte(values), 0644); err != nil {
 		return "", err
 	}
-	glog.Infof("Values of drainer %s:\n %s", d.DrainerName, values)
+	klog.Infof("Values of drainer %s:\n %s", d.DrainerName, values)
 	return path, nil
 }

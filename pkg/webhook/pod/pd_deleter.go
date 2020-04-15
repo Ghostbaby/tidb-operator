@@ -14,11 +14,15 @@
 package pod
 
 import (
+	"github.com/pingcap/advanced-statefulset/pkg/apis/apps/v1/helper"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
+	"github.com/pingcap/tidb-operator/pkg/label"
 	pdutil "github.com/pingcap/tidb-operator/pkg/manager/member"
 	operatorUtils "github.com/pingcap/tidb-operator/pkg/util"
 	"github.com/pingcap/tidb-operator/pkg/webhook/util"
 	admission "k8s.io/api/admission/v1beta1"
+	"k8s.io/apimachinery/pkg/api/errors"
+	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog"
 )
 
@@ -26,16 +30,30 @@ func (pc *PodAdmissionControl) admitDeletePdPods(payload *admitPayload) *admissi
 
 	name := payload.pod.Name
 	namespace := payload.pod.Namespace
-	isInOrdinal, err := operatorUtils.IsPodOrdinalNotExceedReplicas(payload.pod, *payload.ownerStatefulSet.Spec.Replicas)
-	if err != nil {
-		return util.ARFail(err)
-	}
 	ordinal, err := operatorUtils.GetOrdinalFromPodName(name)
 	if err != nil {
 		return util.ARFail(err)
 	}
+
+	// If the pd pod is deleted by restarter, it is necessary to check former pd restart status
+	if _, exist := payload.pod.Annotations[label.AnnPodDeferDeleting]; exist {
+		existed, err := checkFormerPodRestartStatus(pc.kubeCli, v1alpha1.PDMemberType, payload, ordinal)
+		if err != nil {
+			return util.ARFail(err)
+		}
+		if existed {
+			return &admission.AdmissionResponse{
+				Allowed: false,
+			}
+		}
+	}
+
+	isInOrdinal, err := operatorUtils.IsPodOrdinalNotExceedReplicas(payload.pod, payload.ownerStatefulSet)
+	if err != nil {
+		return util.ARFail(err)
+	}
 	tcName := payload.tc.Name
-	isUpgrading := IsStatefulSetUpgrading(payload.ownerStatefulSet)
+	isUpgrading := operatorUtils.IsStatefulSetUpgrading(payload.ownerStatefulSet)
 	IsDeferDeleting := IsPodWithPDDeferDeletingAnnotations(payload.pod)
 
 	isMember, err := IsPodInPdMembers(payload.tc, payload.pod, payload.pdClient)
@@ -65,7 +83,7 @@ func (pc *PodAdmissionControl) admitDeletePdPods(payload *admitPayload) *admissi
 	// check the pd pods which have been upgraded before were all health
 	if isUpgrading {
 		klog.Infof("receive delete pd pod[%s/%s] of tc[%s/%s] is upgrading, make sure former pd upgraded status was health", namespace, name, namespace, tcName)
-		err = checkFormerPDPodStatus(pc.podLister, payload.pdClient, payload.tc, namespace, ordinal, *payload.ownerStatefulSet.Spec.Replicas)
+		err = checkFormerPDPodStatus(pc.kubeCli, payload.pdClient, payload.tc, namespace, ordinal, *payload.ownerStatefulSet.Spec.Replicas)
 		if err != nil {
 			return util.ARFail(err)
 		}
@@ -85,7 +103,7 @@ func (pc *PodAdmissionControl) admitDeleteNonPDMemberPod(payload *admitPayload) 
 
 	name := payload.pod.Name
 	namespace := payload.pod.Namespace
-	isInOrdinal, err := operatorUtils.IsPodOrdinalNotExceedReplicas(payload.pod, *payload.ownerStatefulSet.Spec.Replicas)
+	isInOrdinal, err := operatorUtils.IsPodOrdinalNotExceedReplicas(payload.pod, payload.ownerStatefulSet)
 	if err != nil {
 		return util.ARFail(err)
 	}
@@ -105,12 +123,15 @@ func (pc *PodAdmissionControl) admitDeleteNonPDMemberPod(payload *admitPayload) 
 		// it would be existed an pd-3 instance with its deferDeleting label Annotations PVC.
 		// And the pvc can be deleted during upgrading if we use create pod webhook in future.
 		if !isInOrdinal {
-			pvcName := operatorUtils.OrdinalPVCName(v1alpha1.TiKVMemberType, payload.ownerStatefulSet.Name, ordinal)
-			pvc, err := pc.pvcControl.GetPVC(pvcName, namespace)
+			pvcName := operatorUtils.OrdinalPVCName(v1alpha1.PDMemberType, payload.ownerStatefulSet.Name, ordinal)
+			pvc, err := pc.kubeCli.CoreV1().PersistentVolumeClaims(namespace).Get(pvcName, meta.GetOptions{})
 			if err != nil {
+				if errors.IsNotFound(err) {
+					return util.ARSuccess()
+				}
 				return util.ARFail(err)
 			}
-			err = addDeferDeletingToPVC(pvc, pc.pvcControl, payload.tc)
+			err = addDeferDeletingToPVC(pvc, pc.kubeCli, payload.tc)
 			if err != nil {
 				klog.Infof("tc[%s/%s]'s pod[%s/%s] failed to update pvc,%v", namespace, tcName, namespace, name, err)
 				return util.ARFail(err)
@@ -171,10 +192,11 @@ func (pc *PodAdmissionControl) transferPDLeader(payload *admitPayload) *admissio
 		return util.ARFail(err)
 	}
 	tcName := payload.tc.Name
-	lastOrdinal := payload.tc.Status.PD.StatefulSet.Replicas - 1
 	var targetName string
+
+	lastOrdinal := helper.GetMaxPodOrdinal(*payload.ownerStatefulSet.Spec.Replicas, payload.ownerStatefulSet)
 	if ordinal == lastOrdinal {
-		targetName = pdutil.PdPodName(tcName, 0)
+		targetName = pdutil.PdPodName(tcName, helper.GetMinPodOrdinal(*payload.ownerStatefulSet.Spec.Replicas, payload.ownerStatefulSet))
 	} else {
 		targetName = pdutil.PdPodName(tcName, lastOrdinal)
 	}

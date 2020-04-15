@@ -37,3 +37,7 @@ kubeconfig
 
 # local output directory
 /output/
+# kubetest2 default artifacts directory
+/_artifacts/
+
+.DS_Store

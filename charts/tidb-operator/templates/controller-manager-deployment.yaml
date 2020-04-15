@@ -33,17 +33,20 @@ spec:
 {{ toYaml .Values.controllerManager.resources | indent 12 }}
         command:
           - /usr/local/bin/tidb-controller-manager
-          - -default-storage-class-name={{ .Values.defaultStorageClassName }}
           {{- if .Values.tidbBackupManagerImage }}
           - -tidb-backup-manager-image={{ .Values.tidbBackupManagerImage }}
           {{- end }}
-          {{- if .Values.defaultBackupStorageClassName }}
-          - -default-backup-storage-class-name={{ .Values.defaultBackupStorageClassName }}
-          {{- end }}
+          - -tidb-discovery-image={{ .Values.operatorImage }}
           - -cluster-scoped={{ .Values.clusterScoped }}
-          - -auto-failover={{ .Values.controllerManager.autoFailover | default true }}
+         {{- if eq .Values.controllerManager.autoFailover true }}
+          - -auto-failover=true
+         {{- end }}
+         {{- if eq .Values.controllerManager.autoFailover false }}
+          - -auto-failover=false
+         {{- end }}
           - -pd-failover-period={{ .Values.controllerManager.pdFailoverPeriod | default "5m" }}
           - -tikv-failover-period={{ .Values.controllerManager.tikvFailoverPeriod | default "5m" }}
+          - -tiflash-failover-period={{ .Values.controllerManager.tiflashFailoverPeriod | default "5m" }}
           - -tidb-failover-period={{ .Values.controllerManager.tidbFailoverPeriod | default "5m" }}
           - -v={{ .Values.controllerManager.logLevel }}
           {{- if .Values.testMode }}
@@ -51,6 +54,9 @@ spec:
           {{- end}}
           {{- if .Values.features }}
           - -features={{ join "," .Values.features }}
+          {{- end }}
+          {{- if and ( .Values.admissionWebhook.create ) ( .Values.admissionWebhook.validation.pods ) }}
+          - -pod-webhook-enabled=true
           {{- end }}
         env:
           - name: NAMESPACE

@@ -16,90 +16,96 @@ package restore
 import (
 	"fmt"
 	"os/exec"
-	"path/filepath"
+	"path"
 	"strings"
 
-	"github.com/mholt/archiver"
-	"github.com/pingcap/tidb-operator/cmd/backup-manager/app/constants"
-	"github.com/pingcap/tidb-operator/cmd/backup-manager/app/util"
+	backupUtil "github.com/pingcap/tidb-operator/cmd/backup-manager/app/util"
+	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
+	"github.com/pingcap/tidb-operator/pkg/util"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/klog"
 )
 
-// RestoreOpts contains the input arguments to the restore command
-type RestoreOpts struct {
-	Namespace   string
-	TcName      string
-	Password    string
-	TidbSvc     string
-	User        string
-	RestoreName string
-	BackupPath  string
-	BackupName  string
+type Options struct {
+	backupUtil.GenericOptions
 }
 
-func (ro *RestoreOpts) String() string {
-	return fmt.Sprintf("%s/%s", ro.Namespace, ro.TcName)
-}
-
-func (ro *RestoreOpts) getRestoreDataPath() string {
-	backupName := filepath.Base(ro.BackupPath)
-	NsClusterName := fmt.Sprintf("%s-%s", ro.Namespace, ro.TcName)
-	return filepath.Join(constants.BackupRootPath, NsClusterName, backupName)
-}
-
-func (ro *RestoreOpts) downloadBackupData(localPath string) error {
-	if err := util.EnsureDirectoryExist(filepath.Dir(localPath)); err != nil {
+func (ro *Options) restoreData(restore *v1alpha1.Restore) error {
+	clusterNamespace := restore.Spec.BR.ClusterNamespace
+	if restore.Spec.BR.ClusterNamespace == "" {
+		clusterNamespace = restore.Namespace
+	}
+	args, err := constructBROptions(restore)
+	if err != nil {
 		return err
 	}
-
-	remoteBucket := util.NormalizeBucketURI(ro.BackupPath)
-	rcCopy := exec.Command("rclone", constants.RcloneConfigArg, "copyto", remoteBucket, localPath)
-	if err := rcCopy.Start(); err != nil {
-		return fmt.Errorf("cluster %s, start rclone copyto command for download backup data %s falied, err: %v", ro, ro.BackupPath, err)
-	}
-	if err := rcCopy.Wait(); err != nil {
-		return fmt.Errorf("cluster %s, execute rclone copyto command for download backup data %s failed, err: %v", ro, ro.BackupPath, err)
+	args = append(args, fmt.Sprintf("--pd=%s-pd.%s:2379", restore.Spec.BR.Cluster, clusterNamespace))
+	if ro.TLSCluster {
+		args = append(args, fmt.Sprintf("--ca=%s", path.Join(util.ClusterClientTLSPath, corev1.ServiceAccountRootCAKey)))
+		args = append(args, fmt.Sprintf("--cert=%s", path.Join(util.ClusterClientTLSPath, corev1.TLSCertKey)))
+		args = append(args, fmt.Sprintf("--key=%s", path.Join(util.ClusterClientTLSPath, corev1.TLSPrivateKeyKey)))
 	}
 
+	var restoreType string
+	if restore.Spec.Type == "" {
+		restoreType = string(v1alpha1.BackupTypeFull)
+	} else {
+		restoreType = string(restore.Spec.Type)
+	}
+	fullArgs := []string{
+		"restore",
+		restoreType,
+	}
+	fullArgs = append(fullArgs, args...)
+	klog.Infof("Running br command with args: %v", fullArgs)
+	cmd := exec.Command("br", fullArgs...)
+	cmd.Stderr = cmd.Stdout
+	stdOut, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("cluster %s, create stdout pipe failed, err: %v", ro, err)
+	}
+	err = cmd.Start()
+	if err != nil {
+		return fmt.Errorf("cluster %s, execute br command failed, args: %s, err: %v", ro, fullArgs, err)
+	}
+	var tmpOutput, errMsg string
+	for {
+		tmp := make([]byte, 1024)
+		_, err := stdOut.Read(tmp)
+		tmpOutput = string(tmp)
+		if strings.Contains(tmpOutput, "[ERROR]") {
+			errMsg += tmpOutput
+		}
+		klog.Infof(strings.Replace(tmpOutput, "\n", "", -1))
+		if err != nil {
+			break
+		}
+	}
+	err = cmd.Wait()
+	if err != nil {
+		return fmt.Errorf("cluster %s, wait pipe message failed, errMsg %s, err: %v", ro, errMsg, err)
+	}
+	klog.Infof("Restore data for cluster %s successfully", ro)
 	return nil
 }
 
-func (ro *RestoreOpts) loadTidbClusterData(restorePath string) error {
-	if exist := util.IsDirExist(restorePath); !exist {
-		return fmt.Errorf("dir %s does not exist or is not a dir", restorePath)
-	}
-	args := []string{
-		fmt.Sprintf("-d=%s", restorePath),
-		fmt.Sprintf("-h=%s", ro.TidbSvc),
-		"-P=4000",
-		fmt.Sprintf("-u=%s", ro.User),
-		fmt.Sprintf("-p=%s", ro.Password),
-	}
-
-	output, err := exec.Command("/loader", args...).CombinedOutput()
+func constructBROptions(restore *v1alpha1.Restore) ([]string, error) {
+	args, err := backupUtil.ConstructBRGlobalOptionsForRestore(restore)
 	if err != nil {
-		return fmt.Errorf("cluster %s, execute loader command %v failed, output: %s, err: %v", ro, args, string(output), err)
+		return nil, err
 	}
-	return nil
-}
-
-func (ro *RestoreOpts) getDSN(db string) string {
-	return fmt.Sprintf("%s:%s@(%s:4000)/%s?charset=utf8", ro.User, ro.Password, ro.TidbSvc, db)
-}
-
-// unarchiveBackupData unarchive backup data to dest dir
-func unarchiveBackupData(backupFile, destDir string) (string, error) {
-	var unarchiveBackupPath string
-	if err := util.EnsureDirectoryExist(destDir); err != nil {
-		return unarchiveBackupPath, err
+	config := restore.Spec.BR
+	if config.Concurrency != nil {
+		args = append(args, fmt.Sprintf("--concurrency=%d", *config.Concurrency))
 	}
-	backupName := strings.TrimSuffix(filepath.Base(backupFile), constants.DefaultArchiveExtention)
-	tarGz := archiver.NewTarGz()
-	// overwrite if the file already exists
-	tarGz.OverwriteExisting = true
-	err := tarGz.Unarchive(backupFile, destDir)
-	if err != nil {
-		return unarchiveBackupPath, fmt.Errorf("unarchive backup data %s to %s failed, err: %v", backupFile, destDir, err)
+	if config.Checksum != nil {
+		args = append(args, fmt.Sprintf("--checksum=%t", *config.Checksum))
 	}
-	unarchiveBackupPath = filepath.Join(destDir, backupName)
-	return unarchiveBackupPath, nil
+	if config.RateLimit != nil {
+		args = append(args, fmt.Sprintf("--ratelimit=%d", *config.RateLimit))
+	}
+	if config.OnLine != nil {
+		args = append(args, fmt.Sprintf("--online=%t", *config.OnLine))
+	}
+	return args, nil
 }

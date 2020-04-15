@@ -39,7 +39,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
-	glog "k8s.io/klog"
+	"k8s.io/klog"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -75,12 +75,13 @@ func NewController(
 	pdFailoverPeriod time.Duration,
 	tikvFailoverPeriod time.Duration,
 	tidbFailoverPeriod time.Duration,
+	tiflashFailoverPeriod time.Duration,
 ) *Controller {
-	eventBroadcaster := record.NewBroadcaster()
-	eventBroadcaster.StartLogging(glog.Infof)
+	eventBroadcaster := record.NewBroadcasterWithCorrelatorOptions(record.CorrelatorOptions{QPS: 1})
+	eventBroadcaster.StartLogging(klog.V(2).Infof)
 	eventBroadcaster.StartRecordingToSink(&eventv1.EventSinkImpl{
 		Interface: eventv1.New(kubeCli.CoreV1().RESTClient()).Events("")})
-	recorder := eventBroadcaster.NewRecorder(v1alpha1.Scheme, corev1.EventSource{Component: "tidbcluster"})
+	recorder := eventBroadcaster.NewRecorder(v1alpha1.Scheme, corev1.EventSource{Component: "tidb-controller-manager"})
 
 	tcInformer := informerFactory.Pingcap().V1alpha1().TidbClusters()
 	setInformer := kubeInformerFactory.Apps().V1().StatefulSets()
@@ -91,28 +92,31 @@ func NewController(
 	podInformer := kubeInformerFactory.Core().V1().Pods()
 	nodeInformer := kubeInformerFactory.Core().V1().Nodes()
 	csrInformer := kubeInformerFactory.Certificates().V1beta1().CertificateSigningRequests()
-	secretInformer := kubeInformerFactory.Core().V1().Secrets()
-	cmInformer := kubeInformerFactory.Core().V1().ConfigMaps()
 
 	tcControl := controller.NewRealTidbClusterControl(cli, tcInformer.Lister(), recorder)
 	pdControl := pdapi.NewDefaultPDControl(kubeCli)
-	tidbControl := controller.NewDefaultTiDBControl()
+	tidbControl := controller.NewDefaultTiDBControl(kubeCli)
+	cmControl := controller.NewRealConfigMapControl(kubeCli, recorder)
 	setControl := controller.NewRealStatefuSetControl(kubeCli, setInformer.Lister(), recorder)
 	svcControl := controller.NewRealServiceControl(kubeCli, svcInformer.Lister(), recorder)
 	pvControl := controller.NewRealPVControl(kubeCli, pvcInformer.Lister(), pvInformer.Lister(), recorder)
 	pvcControl := controller.NewRealPVCControl(kubeCli, recorder, pvcInformer.Lister())
 	podControl := controller.NewRealPodControl(kubeCli, pdControl, podInformer.Lister(), recorder)
-	secControl := controller.NewRealSecretControl(kubeCli, secretInformer.Lister())
+	secControl := controller.NewRealSecretControl(kubeCli)
 	certControl := controller.NewRealCertControl(kubeCli, csrInformer.Lister(), secControl)
 	typedControl := controller.NewTypedControl(controller.NewRealGenericControl(genericCli, recorder))
 	pdScaler := mm.NewPDScaler(pdControl, pvcInformer.Lister(), pvcControl)
 	tikvScaler := mm.NewTiKVScaler(pdControl, pvcInformer.Lister(), pvcControl, podInformer.Lister())
-	pdFailover := mm.NewPDFailover(cli, pdControl, pdFailoverPeriod, podInformer.Lister(), podControl, pvcInformer.Lister(), pvcControl, pvInformer.Lister())
-	tikvFailover := mm.NewTiKVFailover(tikvFailoverPeriod)
-	tidbFailover := mm.NewTiDBFailover(tidbFailoverPeriod)
+	tiflashScaler := mm.NewTiFlashScaler(pdControl, pvcInformer.Lister(), pvcControl, podInformer.Lister())
+	pdFailover := mm.NewPDFailover(cli, pdControl, pdFailoverPeriod, podInformer.Lister(), podControl, pvcInformer.Lister(), pvcControl, pvInformer.Lister(), recorder)
+	tikvFailover := mm.NewTiKVFailover(tikvFailoverPeriod, recorder)
+	tidbFailover := mm.NewTiDBFailover(tidbFailoverPeriod, recorder)
+	tiflashFailover := mm.NewTiFlashFailover(tiflashFailoverPeriod)
 	pdUpgrader := mm.NewPDUpgrader(pdControl, podControl, podInformer.Lister())
 	tikvUpgrader := mm.NewTiKVUpgrader(pdControl, podControl, podInformer.Lister())
+	tiflashUpgrader := mm.NewTiFlashUpgrader(pdControl, podControl, podInformer.Lister())
 	tidbUpgrader := mm.NewTiDBUpgrader(tidbControl, podInformer.Lister())
+	podRestarter := mm.NewPodRestarter(kubeCli, podInformer.Lister())
 
 	tcc := &Controller{
 		kubeClient: kubeCli,
@@ -125,6 +129,7 @@ func NewController(
 				svcControl,
 				podControl,
 				certControl,
+				typedControl,
 				setInformer.Lister(),
 				svcInformer.Lister(),
 				podInformer.Lister(),
@@ -140,6 +145,7 @@ func NewController(
 				setControl,
 				svcControl,
 				certControl,
+				typedControl,
 				setInformer.Lister(),
 				svcInformer.Lister(),
 				podInformer.Lister(),
@@ -158,7 +164,6 @@ func NewController(
 				setInformer.Lister(),
 				svcInformer.Lister(),
 				podInformer.Lister(),
-				cmInformer.Lister(),
 				tidbUpgrader,
 				autoFailover,
 				tidbFailover,
@@ -191,13 +196,32 @@ func NewController(
 				pvControl,
 			),
 			mm.NewPumpMemberManager(
+				certControl,
 				setControl,
 				svcControl,
 				typedControl,
+				cmControl,
 				setInformer.Lister(),
 				svcInformer.Lister(),
-				cmInformer.Lister(),
+				podInformer.Lister(),
 			),
+			mm.NewTiFlashMemberManager(
+				pdControl,
+				setControl,
+				svcControl,
+				certControl,
+				typedControl,
+				setInformer.Lister(),
+				svcInformer.Lister(),
+				podInformer.Lister(),
+				nodeInformer.Lister(),
+				autoFailover,
+				tiflashFailover,
+				tiflashScaler,
+				tiflashUpgrader,
+			),
+			mm.NewTidbDiscoveryManager(typedControl),
+			podRestarter,
 			recorder,
 		),
 		queue: workqueue.NewNamedRateLimitingQueue(
@@ -234,8 +258,8 @@ func (tcc *Controller) Run(workers int, stopCh <-chan struct{}) {
 	defer utilruntime.HandleCrash()
 	defer tcc.queue.ShutDown()
 
-	glog.Info("Starting tidbcluster controller")
-	defer glog.Info("Shutting down tidbcluster controller")
+	klog.Info("Starting tidbcluster controller")
+	defer klog.Info("Shutting down tidbcluster controller")
 
 	for i := 0; i < workers; i++ {
 		go wait.Until(tcc.worker, time.Second, stopCh)
@@ -261,7 +285,7 @@ func (tcc *Controller) processNextWorkItem() bool {
 	defer tcc.queue.Done(key)
 	if err := tcc.sync(key.(string)); err != nil {
 		if perrors.Find(err, controller.IsRequeueError) != nil {
-			glog.Infof("TidbCluster: %v, still need sync: %v, requeuing", key.(string), err)
+			klog.Infof("TidbCluster: %v, still need sync: %v, requeuing", key.(string), err)
 		} else {
 			utilruntime.HandleError(fmt.Errorf("TidbCluster: %v, sync failed %v, requeuing", key.(string), err))
 		}
@@ -276,7 +300,7 @@ func (tcc *Controller) processNextWorkItem() bool {
 func (tcc *Controller) sync(key string) error {
 	startTime := time.Now()
 	defer func() {
-		glog.V(4).Infof("Finished syncing TidbCluster %q (%v)", key, time.Since(startTime))
+		klog.V(4).Infof("Finished syncing TidbCluster %q (%v)", key, time.Since(startTime))
 	}()
 
 	ns, name, err := cache.SplitMetaNamespaceKey(key)
@@ -285,7 +309,7 @@ func (tcc *Controller) sync(key string) error {
 	}
 	tc, err := tcc.tcLister.TidbClusters(ns).Get(name)
 	if errors.IsNotFound(err) {
-		glog.Infof("TidbCluster has been deleted %v", key)
+		klog.Infof("TidbCluster has been deleted %v", key)
 		return nil
 	}
 	if err != nil {
@@ -327,7 +351,7 @@ func (tcc *Controller) addStatefulSet(obj interface{}) {
 	if tc == nil {
 		return
 	}
-	glog.V(4).Infof("StatefuSet %s/%s created, TidbCluster: %s/%s", ns, setName, ns, tc.Name)
+	klog.V(4).Infof("StatefuSet %s/%s created, TidbCluster: %s/%s", ns, setName, ns, tc.Name)
 	tcc.enqueueTidbCluster(tc)
 }
 
@@ -348,7 +372,7 @@ func (tcc *Controller) updateStatefuSet(old, cur interface{}) {
 	if tc == nil {
 		return
 	}
-	glog.V(4).Infof("StatefulSet %s/%s updated, %+v -> %+v.", ns, setName, oldSet.Spec, curSet.Spec)
+	klog.V(4).Infof("StatefulSet %s/%s updated, %+v -> %+v.", ns, setName, oldSet.Spec, curSet.Spec)
 	tcc.enqueueTidbCluster(tc)
 }
 
@@ -379,7 +403,7 @@ func (tcc *Controller) deleteStatefulSet(obj interface{}) {
 	if tc == nil {
 		return
 	}
-	glog.V(4).Infof("StatefulSet %s/%s deleted through %v.", ns, setName, utilruntime.GetCaller())
+	klog.V(4).Infof("StatefulSet %s/%s deleted through %v.", ns, setName, utilruntime.GetCaller())
 	tcc.enqueueTidbCluster(tc)
 }
 

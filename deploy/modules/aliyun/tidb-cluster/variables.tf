@@ -12,12 +12,12 @@ variable "image_id" {
 
 variable "tidb_version" {
   description = "TiDB cluster version"
-  default     = "v3.0.0"
+  default     = "v3.0.8"
 }
 
 variable "tidb_cluster_chart_version" {
   description = "tidb-cluster chart version"
-  default     = "v1.0.5"
+  default     = "v1.0.6"
 }
 
 variable "pd_count" {
@@ -64,4 +64,9 @@ variable "local_exec_interpreter" {
   description = "Command to run for local-exec resources. Must be a shell-style interpreter. If you are on Windows Git Bash is a good choice."
   type        = list(string)
   default     = ["/bin/sh", "-c"]
+}
+
+variable "create_tidb_cluster_release" {
+  description = "whether creating tidb-cluster helm release"
+  default     = false
 }

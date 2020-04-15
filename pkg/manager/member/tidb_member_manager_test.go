@@ -30,6 +30,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -37,6 +38,7 @@ import (
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/utils/pointer"
 )
 
 func TestTiDBMemberManagerSyncCreate(t *testing.T) {
@@ -215,7 +217,7 @@ func TestTiDBMemberManagerSyncUpdate(t *testing.T) {
 		{
 			name: "enable separate slowlog on the fly",
 			modify: func(tc *v1alpha1.TidbCluster) {
-				tc.Spec.TiDB.SeparateSlowLog = true
+				tc.Spec.TiDB.SeparateSlowLog = pointer.BoolPtr(true)
 			},
 			errWhenUpdateStatefulSet: false,
 			err:                      false,
@@ -264,7 +266,7 @@ func TestTiDBMemberManagerTiDBStatefulSetIsUpgrading(t *testing.T) {
 					Name:        ordinalPodName(v1alpha1.TiDBMemberType, tc.GetName(), 0),
 					Namespace:   metav1.NamespaceDefault,
 					Annotations: map[string]string{},
-					Labels:      label.New().Instance(tc.GetLabels()[label.InstanceLabelKey]).TiDB().Labels(),
+					Labels:      label.New().Instance(tc.GetInstanceName()).TiDB().Labels(),
 				},
 			}
 			if test.updatePod != nil {
@@ -336,6 +338,7 @@ func TestTiDBMemberManagerSyncTidbClusterStatus(t *testing.T) {
 	type testcase struct {
 		name        string
 		updateTC    func(*v1alpha1.TidbCluster)
+		updateSts   func(*apps.StatefulSet)
 		upgradingFn func(corelisters.PodLister, *apps.StatefulSet, *v1alpha1.TidbCluster) (bool, error)
 		healthInfo  map[string]bool
 		errExpectFn func(*GomegaWithT, error)
@@ -350,10 +353,14 @@ func TestTiDBMemberManagerSyncTidbClusterStatus(t *testing.T) {
 		tc.Status.PD.Phase = v1alpha1.NormalPhase
 		tc.Status.TiKV.Phase = v1alpha1.NormalPhase
 		set := &apps.StatefulSet{
-			Status: status,
+			ObjectMeta: metav1.ObjectMeta{},
+			Status:     status,
 		}
 		if test.updateTC != nil {
 			test.updateTC(tc)
+		}
+		if test.updateSts != nil {
+			test.updateSts(set)
 		}
 		pmm, _, _, tidbControl, _ := newFakeTiDBMemberManager()
 
@@ -447,13 +454,18 @@ func TestTiDBMemberManagerSyncTidbClusterStatus(t *testing.T) {
 		{
 			name:     "get health empty",
 			updateTC: nil,
+			updateSts: func(sts *apps.StatefulSet) {
+				sts.Status = apps.StatefulSetStatus{
+					Replicas: 0,
+				}
+			},
 			upgradingFn: func(lister corelisters.PodLister, set *apps.StatefulSet, cluster *v1alpha1.TidbCluster) (bool, error) {
 				return false, nil
 			},
 			healthInfo:  map[string]bool{},
 			errExpectFn: errExpectNil,
 			tcExpectFn: func(g *GomegaWithT, tc *v1alpha1.TidbCluster) {
-				g.Expect(tc.Status.TiDB.StatefulSet.Replicas).To(Equal(int32(3)))
+				g.Expect(tc.Status.TiDB.StatefulSet.Replicas).To(Equal(int32(0)))
 				g.Expect(len(tc.Status.TiDB.Members)).To(Equal(0))
 			},
 		},
@@ -466,54 +478,54 @@ func TestTiDBMemberManagerSyncTidbClusterStatus(t *testing.T) {
 				return false, nil
 			},
 			healthInfo: map[string]bool{
-				"333": true,
+				"test-tidb-2": true,
 			},
 			errExpectFn: errExpectNil,
 			tcExpectFn: func(g *GomegaWithT, tc *v1alpha1.TidbCluster) {
-				g.Expect(len(tc.Status.TiDB.Members)).To(Equal(1))
-				g.Expect(tc.Status.TiDB.Members["333"].LastTransitionTime.Time.IsZero()).To(BeFalse())
+				g.Expect(len(tc.Status.TiDB.Members)).To(Equal(3))
+				g.Expect(tc.Status.TiDB.Members["test-tidb-2"].LastTransitionTime.Time.IsZero()).To(BeFalse())
 			},
 		},
 		{
 			name: "state not change, LastTransitionTime not change",
 			updateTC: func(tc *v1alpha1.TidbCluster) {
 				tc.Status.TiDB.Members = map[string]v1alpha1.TiDBMember{}
-				tc.Status.TiDB.Members["333"] = v1alpha1.TiDBMember{
+				tc.Status.TiDB.Members["test-tidb-2"] = v1alpha1.TiDBMember{
 					Health:             true,
 					LastTransitionTime: now,
 				}
 			},
 			healthInfo: map[string]bool{
-				"333": true,
+				"test-tidb-2": true,
 			},
 			upgradingFn: func(lister corelisters.PodLister, set *apps.StatefulSet, cluster *v1alpha1.TidbCluster) (bool, error) {
 				return false, nil
 			},
 			errExpectFn: errExpectNil,
 			tcExpectFn: func(g *GomegaWithT, tc *v1alpha1.TidbCluster) {
-				g.Expect(len(tc.Status.TiDB.Members)).To(Equal(1))
-				g.Expect(tc.Status.TiDB.Members["333"].LastTransitionTime).To(Equal(now))
+				g.Expect(len(tc.Status.TiDB.Members)).To(Equal(3))
+				g.Expect(tc.Status.TiDB.Members["test-tidb-2"].LastTransitionTime).To(Equal(now))
 			},
 		},
 		{
 			name: "state change, LastTransitionTime change",
 			updateTC: func(tc *v1alpha1.TidbCluster) {
 				tc.Status.TiDB.Members = map[string]v1alpha1.TiDBMember{}
-				tc.Status.TiDB.Members["333"] = v1alpha1.TiDBMember{
+				tc.Status.TiDB.Members["test-tidb-2"] = v1alpha1.TiDBMember{
 					Health:             false,
 					LastTransitionTime: now,
 				}
 			},
 			healthInfo: map[string]bool{
-				"333": true,
+				"test-tidb-2": true,
 			},
 			upgradingFn: func(lister corelisters.PodLister, set *apps.StatefulSet, cluster *v1alpha1.TidbCluster) (bool, error) {
 				return false, nil
 			},
 			errExpectFn: errExpectNil,
 			tcExpectFn: func(g *GomegaWithT, tc *v1alpha1.TidbCluster) {
-				g.Expect(len(tc.Status.TiDB.Members)).To(Equal(1))
-				g.Expect(tc.Status.TiDB.Members["333"].LastTransitionTime).NotTo(Equal(now))
+				g.Expect(len(tc.Status.TiDB.Members)).To(Equal(3))
+				g.Expect(tc.Status.TiDB.Members["test-tidb-2"].LastTransitionTime).NotTo(Equal(now))
 			},
 		},
 	}
@@ -713,6 +725,22 @@ func TestTiDBMemberManagerSyncTidbService(t *testing.T) {
 				g.Expect(svc.Spec.ClusterIP).To(Equal("8.8.8.8"))
 			},
 		},
+		{
+			name: "Create service with portName",
+			prepare: func(tc *v1alpha1.TidbCluster, _ *fakeIndexers) {
+				tc.Spec.TiDB.Service = &v1alpha1.TiDBServiceSpec{
+					ServiceSpec: v1alpha1.ServiceSpec{
+						Type:     corev1.ServiceTypeClusterIP,
+						PortName: pointer.StringPtr("mysql-tidb"),
+					},
+				}
+			},
+			expectFn: func(g *GomegaWithT, err error, svc *corev1.Service) {
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(svc).NotTo(BeNil())
+				g.Expect(svc.Spec.Ports[0].Name).To(Equal("mysql-tidb"))
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -744,7 +772,7 @@ func newFakeTiDBMemberManager() (*tidbMemberManager, *controller.FakeStatefulSet
 	cmInformer := kubeinformers.NewSharedInformerFactory(kubeCli, 0).Core().V1().ConfigMaps()
 	setControl := controller.NewFakeStatefulSetControl(setInformer, tcInformer)
 	svcControl := controller.NewFakeServiceControl(svcInformer, epsInformer, tcInformer)
-	secControl := controller.NewFakeSecretControl(kubeCli, secretInformer.Lister())
+	secControl := controller.NewFakeSecretControl(kubeCli)
 	certControl := controller.NewFakeCertControl(kubeCli, csrInformer.Lister(), secControl)
 	genericControl := controller.NewFakeGenericControl()
 	tidbUpgrader := NewFakeTiDBUpgrader()
@@ -794,10 +822,10 @@ func newTidbClusterForTiDB() *v1alpha1.TidbCluster {
 				ComponentSpec: v1alpha1.ComponentSpec{
 					Image: v1alpha1.TiDBMemberType.String(),
 				},
-				Resources: v1alpha1.Resources{
-					Requests: &v1alpha1.ResourceRequirement{
-						CPU:    "1",
-						Memory: "2Gi",
+				ResourceRequirements: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceCPU:    resource.MustParse("1"),
+						corev1.ResourceMemory: resource.MustParse("2Gi"),
 					},
 				},
 				Replicas: 3,
@@ -827,7 +855,7 @@ func TestGetNewTiDBHeadlessServiceForTidbCluster(t *testing.T) {
 					Labels: map[string]string{
 						"app.kubernetes.io/name":       "tidb-cluster",
 						"app.kubernetes.io/managed-by": "tidb-operator",
-						"app.kubernetes.io/instance":   "",
+						"app.kubernetes.io/instance":   "foo",
 						"app.kubernetes.io/component":  "tidb",
 					},
 					OwnerReferences: []metav1.OwnerReference{
@@ -858,7 +886,7 @@ func TestGetNewTiDBHeadlessServiceForTidbCluster(t *testing.T) {
 					Selector: map[string]string{
 						"app.kubernetes.io/name":       "tidb-cluster",
 						"app.kubernetes.io/managed-by": "tidb-operator",
-						"app.kubernetes.io/instance":   "",
+						"app.kubernetes.io/instance":   "foo",
 						"app.kubernetes.io/component":  "tidb",
 					},
 					PublishNotReadyAddresses: true,
@@ -879,6 +907,7 @@ func TestGetNewTiDBHeadlessServiceForTidbCluster(t *testing.T) {
 
 func TestGetNewTiDBSetForTidbCluster(t *testing.T) {
 	enable := true
+	updateStrategy := v1alpha1.ConfigUpdateStrategyRollingUpdate
 	tests := []struct {
 		name    string
 		tc      v1alpha1.TidbCluster
@@ -956,8 +985,10 @@ func TestGetNewTiDBSetForTidbCluster(t *testing.T) {
 				},
 				Spec: v1alpha1.TidbClusterSpec{
 					TiDB: v1alpha1.TiDBSpec{
-						Config:               &v1alpha1.TiDBConfig{},
-						ConfigUpdateStrategy: v1alpha1.ConfigUpdateStrategyRollingUpdate,
+						ComponentSpec: v1alpha1.ComponentSpec{
+							ConfigUpdateStrategy: &updateStrategy,
+						},
+						Config: &v1alpha1.TiDBConfig{},
 					},
 				},
 			},
@@ -972,6 +1003,47 @@ func TestGetNewTiDBSetForTidbCluster(t *testing.T) {
 				})
 				g := NewGomegaWithT(t)
 				g.Expect(cmName).To(Equal("tc-tidb-xxxxxxxx"))
+			},
+		},
+		{
+			name: "tidb should respect resources config",
+			tc: v1alpha1.TidbCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "tc",
+					Namespace: "ns",
+				},
+				Spec: v1alpha1.TidbClusterSpec{
+					TiDB: v1alpha1.TiDBSpec{
+						ResourceRequirements: corev1.ResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceCPU:              resource.MustParse("1"),
+								corev1.ResourceMemory:           resource.MustParse("2Gi"),
+								corev1.ResourceEphemeralStorage: resource.MustParse("10Gi"),
+							},
+							Limits: corev1.ResourceList{
+								corev1.ResourceCPU:              resource.MustParse("1"),
+								corev1.ResourceMemory:           resource.MustParse("2Gi"),
+								corev1.ResourceEphemeralStorage: resource.MustParse("10Gi"),
+							},
+						},
+					},
+				},
+			},
+			testSts: func(sts *apps.StatefulSet) {
+				g := NewGomegaWithT(t)
+				nameToContainer := MapContainers(&sts.Spec.Template.Spec)
+				g.Expect(nameToContainer[v1alpha1.TiDBMemberType.String()].Resources).To(Equal(corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceCPU:              resource.MustParse("1"),
+						corev1.ResourceMemory:           resource.MustParse("2Gi"),
+						corev1.ResourceEphemeralStorage: resource.MustParse("10Gi"),
+					},
+					Limits: corev1.ResourceList{
+						corev1.ResourceCPU:              resource.MustParse("1"),
+						corev1.ResourceMemory:           resource.MustParse("2Gi"),
+						corev1.ResourceEphemeralStorage: resource.MustParse("10Gi"),
+					},
+				}))
 			},
 		},
 		// TODO add more tests
@@ -1250,6 +1322,7 @@ func TestTiDBInitContainers(t *testing.T) {
 
 func TestGetNewTiDBService(t *testing.T) {
 	g := NewGomegaWithT(t)
+	trafficPolicy := corev1.ServiceExternalTrafficPolicyTypeLocal
 	testCases := []struct {
 		name     string
 		tc       v1alpha1.TidbCluster
@@ -1275,7 +1348,7 @@ func TestGetNewTiDBService(t *testing.T) {
 				Spec: v1alpha1.TidbClusterSpec{
 					TiDB: v1alpha1.TiDBSpec{
 						Service: &v1alpha1.TiDBServiceSpec{
-							ExposeStatus: false,
+							ExposeStatus: pointer.BoolPtr(false),
 						},
 					},
 				},
@@ -1287,7 +1360,7 @@ func TestGetNewTiDBService(t *testing.T) {
 					Labels: map[string]string{
 						"app.kubernetes.io/name":       "tidb-cluster",
 						"app.kubernetes.io/managed-by": "tidb-operator",
-						"app.kubernetes.io/instance":   "",
+						"app.kubernetes.io/instance":   "foo",
 						"app.kubernetes.io/component":  "tidb",
 					},
 					OwnerReferences: []metav1.OwnerReference{
@@ -1317,7 +1390,7 @@ func TestGetNewTiDBService(t *testing.T) {
 					Selector: map[string]string{
 						"app.kubernetes.io/name":       "tidb-cluster",
 						"app.kubernetes.io/managed-by": "tidb-operator",
-						"app.kubernetes.io/instance":   "",
+						"app.kubernetes.io/instance":   "foo",
 						"app.kubernetes.io/component":  "tidb",
 					},
 				},
@@ -1333,7 +1406,7 @@ func TestGetNewTiDBService(t *testing.T) {
 				Spec: v1alpha1.TidbClusterSpec{
 					TiDB: v1alpha1.TiDBSpec{
 						Service: &v1alpha1.TiDBServiceSpec{
-							ExposeStatus: true,
+							ExposeStatus: pointer.BoolPtr(true),
 						},
 					},
 				},
@@ -1345,7 +1418,7 @@ func TestGetNewTiDBService(t *testing.T) {
 					Labels: map[string]string{
 						"app.kubernetes.io/name":       "tidb-cluster",
 						"app.kubernetes.io/managed-by": "tidb-operator",
-						"app.kubernetes.io/instance":   "",
+						"app.kubernetes.io/instance":   "foo",
 						"app.kubernetes.io/component":  "tidb",
 					},
 					OwnerReferences: []metav1.OwnerReference{
@@ -1381,7 +1454,7 @@ func TestGetNewTiDBService(t *testing.T) {
 					Selector: map[string]string{
 						"app.kubernetes.io/name":       "tidb-cluster",
 						"app.kubernetes.io/managed-by": "tidb-operator",
-						"app.kubernetes.io/instance":   "",
+						"app.kubernetes.io/instance":   "foo",
 						"app.kubernetes.io/component":  "tidb",
 					},
 				},
@@ -1403,8 +1476,8 @@ func TestGetNewTiDBService(t *testing.T) {
 									"lb-type": "testlb",
 								},
 							},
-							ExternalTrafficPolicy: corev1.ServiceExternalTrafficPolicyTypeLocal,
-							ExposeStatus:          true,
+							ExternalTrafficPolicy: &trafficPolicy,
+							ExposeStatus:          pointer.BoolPtr(true),
 						},
 					},
 				},
@@ -1416,7 +1489,7 @@ func TestGetNewTiDBService(t *testing.T) {
 					Labels: map[string]string{
 						"app.kubernetes.io/name":       "tidb-cluster",
 						"app.kubernetes.io/managed-by": "tidb-operator",
-						"app.kubernetes.io/instance":   "",
+						"app.kubernetes.io/instance":   "foo",
 						"app.kubernetes.io/component":  "tidb",
 					},
 					Annotations: map[string]string{
@@ -1457,7 +1530,7 @@ func TestGetNewTiDBService(t *testing.T) {
 					Selector: map[string]string{
 						"app.kubernetes.io/name":       "tidb-cluster",
 						"app.kubernetes.io/managed-by": "tidb-operator",
-						"app.kubernetes.io/instance":   "",
+						"app.kubernetes.io/instance":   "foo",
 						"app.kubernetes.io/component":  "tidb",
 					},
 				},
@@ -1481,6 +1554,7 @@ func TestGetNewTiDBService(t *testing.T) {
 
 func TestGetTiDBConfigMap(t *testing.T) {
 	g := NewGomegaWithT(t)
+	updateStrategy := v1alpha1.ConfigUpdateStrategyInPlace
 	testCases := []struct {
 		name     string
 		tc       v1alpha1.TidbCluster
@@ -1505,9 +1579,11 @@ func TestGetTiDBConfigMap(t *testing.T) {
 				},
 				Spec: v1alpha1.TidbClusterSpec{
 					TiDB: v1alpha1.TiDBSpec{
-						ConfigUpdateStrategy: v1alpha1.ConfigUpdateStrategyInPlace,
+						ComponentSpec: v1alpha1.ComponentSpec{
+							ConfigUpdateStrategy: &updateStrategy,
+						},
 						Config: &v1alpha1.TiDBConfig{
-							Host: "0.0.0.0",
+							Lease: pointer.StringPtr("45s"),
 						},
 					},
 				},
@@ -1519,7 +1595,7 @@ func TestGetTiDBConfigMap(t *testing.T) {
 					Labels: map[string]string{
 						"app.kubernetes.io/name":       "tidb-cluster",
 						"app.kubernetes.io/managed-by": "tidb-operator",
-						"app.kubernetes.io/instance":   "",
+						"app.kubernetes.io/instance":   "foo",
 						"app.kubernetes.io/component":  "tidb",
 					},
 					OwnerReferences: []metav1.OwnerReference{
@@ -1539,7 +1615,7 @@ func TestGetTiDBConfigMap(t *testing.T) {
 				},
 				Data: map[string]string{
 					"startup-script": "",
-					"config-file": `host = "0.0.0.0"
+					"config-file": `lease = "45s"
 `,
 				},
 			},
@@ -1552,11 +1628,13 @@ func TestGetTiDBConfigMap(t *testing.T) {
 					Namespace: "ns",
 				},
 				Spec: v1alpha1.TidbClusterSpec{
-					EnableTLSCluster: true,
+					TLSCluster: &v1alpha1.TLSCluster{Enabled: true},
 					TiDB: v1alpha1.TiDBSpec{
-						ConfigUpdateStrategy: v1alpha1.ConfigUpdateStrategyInPlace,
-						EnableTLSClient:      true,
-						Config:               &v1alpha1.TiDBConfig{},
+						ComponentSpec: v1alpha1.ComponentSpec{
+							ConfigUpdateStrategy: &updateStrategy,
+						},
+						TLSClient: &v1alpha1.TiDBTLSClient{Enabled: true},
+						Config:    &v1alpha1.TiDBConfig{},
 					},
 				},
 			},
@@ -1567,7 +1645,7 @@ func TestGetTiDBConfigMap(t *testing.T) {
 					Labels: map[string]string{
 						"app.kubernetes.io/name":       "tidb-cluster",
 						"app.kubernetes.io/managed-by": "tidb-operator",
-						"app.kubernetes.io/instance":   "",
+						"app.kubernetes.io/instance":   "foo",
 						"app.kubernetes.io/component":  "tidb",
 					},
 					OwnerReferences: []metav1.OwnerReference{
@@ -1588,12 +1666,12 @@ func TestGetTiDBConfigMap(t *testing.T) {
 				Data: map[string]string{
 					"startup-script": "",
 					"config-file": `[security]
-  ssl-ca = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
-  ssl-cert = "/var/lib/tidb-server-tls/cert"
-  ssl-key = "/var/lib/tidb-server-tls/key"
-  cluster-ssl-ca = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
-  cluster-ssl-cert = "/var/lib/tidb-tls/cert"
-  cluster-ssl-key = "/var/lib/tidb-tls/key"
+  ssl-ca = "/var/lib/tidb-server-tls/ca.crt"
+  ssl-cert = "/var/lib/tidb-server-tls/tls.crt"
+  ssl-key = "/var/lib/tidb-server-tls/tls.key"
+  cluster-ssl-ca = "/var/lib/tidb-tls/ca.crt"
+  cluster-ssl-cert = "/var/lib/tidb-tls/tls.crt"
+  cluster-ssl-key = "/var/lib/tidb-tls/tls.key"
 `,
 				},
 			},
@@ -1614,5 +1692,112 @@ func TestGetTiDBConfigMap(t *testing.T) {
 				t.Errorf("unexpected plugin configuration (-want, +got): %s", diff)
 			}
 		})
+	}
+}
+
+func TestTiDBMemberManagerScaleToZeroReplica(t *testing.T) {
+	g := NewGomegaWithT(t)
+	type testcase struct {
+		name                     string
+		setStatus                func(cluster *v1alpha1.TidbCluster)
+		errWhenUpdateStatefulSet bool
+		statusChange             func(*apps.StatefulSet)
+		err                      bool
+		expectStatefulSetFn      func(*GomegaWithT, *apps.StatefulSet, *v1alpha1.TidbCluster, error)
+	}
+
+	syncTiDBCluster := func(tmm *tidbMemberManager, tc *v1alpha1.TidbCluster, test *testcase) {
+		err := tmm.Sync(tc)
+		if test.err {
+			g.Expect(err).To(HaveOccurred())
+		} else {
+			g.Expect(err).NotTo(HaveOccurred())
+		}
+	}
+
+	testFn := func(test *testcase, t *testing.T) {
+		t.Log(test.name)
+
+		tc := newTidbClusterForTiDB()
+		tc.Spec.TiDB.MaxFailoverCount = pointer.Int32Ptr(3)
+		tc.Spec.TiKV.MaxFailoverCount = pointer.Int32Ptr(3)
+		tc.Status.TiKV.Stores = map[string]v1alpha1.TiKVStore{
+			"tikv-0": {PodName: "tikv-0", State: v1alpha1.TiKVStateUp},
+		}
+		tc.Status.TiKV.StatefulSet = &apps.StatefulSetStatus{ReadyReplicas: 1}
+
+		if test.setStatus != nil {
+			test.setStatus(tc)
+		}
+
+		ns := tc.GetNamespace()
+		tcName := tc.GetName()
+
+		tmm, fakeSetControl, _, _, _ := newFakeTiDBMemberManager()
+
+		err := tmm.Sync(tc)
+		g.Expect(err).NotTo(HaveOccurred())
+
+		g.Expect(err).NotTo(HaveOccurred())
+		_, err = tmm.setLister.StatefulSets(ns).Get(controller.TiDBMemberName(tcName))
+		g.Expect(err).NotTo(HaveOccurred())
+
+		tc1 := tc.DeepCopy()
+		// scale to 0
+		tc1.Spec.TiDB.Replicas = 0
+
+		if test.errWhenUpdateStatefulSet {
+			fakeSetControl.SetUpdateStatefulSetError(errors.NewInternalError(fmt.Errorf("API server failed")), 0)
+		}
+		syncTiDBCluster(tmm, tc1, test)
+		syncTiDBCluster(tmm, tc1, test)
+
+		if test.expectStatefulSetFn != nil {
+			set, err := tmm.setLister.StatefulSets(ns).Get(controller.TiDBMemberName(tcName))
+			test.expectStatefulSetFn(g, set, tc1, err)
+		}
+
+	}
+
+	tests := []testcase{
+		{
+			name: "TiDB should clear failureMembers when scale to 0",
+			setStatus: func(tc *v1alpha1.TidbCluster) {
+				tc.Status.PD.Phase = v1alpha1.NormalPhase
+				tc.Status.TiKV.Phase = v1alpha1.NormalPhase
+				tc.Status.TiDB.FailureMembers = map[string]v1alpha1.TiDBFailureMember{
+					"tidb-0": {CreatedAt: metav1.Now(), PodName: "tidb-0"},
+					"tidb-1": {CreatedAt: metav1.Now(), PodName: "tidb-1"},
+				}
+			},
+			errWhenUpdateStatefulSet: false,
+			err:                      false,
+			expectStatefulSetFn: func(g *GomegaWithT, set *apps.StatefulSet, tc *v1alpha1.TidbCluster, err error) {
+				g.Expect(len(tc.Status.TiDB.FailureMembers)).To(Equal(0))
+				g.Expect(*set.Spec.Replicas).To(Equal(int32(0)))
+			},
+		},
+		{
+			name: "TiDB should clear failureMembers when scale to 0 and tidb is upgrading",
+			setStatus: func(tc *v1alpha1.TidbCluster) {
+				tc.Status.PD.Phase = v1alpha1.NormalPhase
+				tc.Status.TiKV.Phase = v1alpha1.NormalPhase
+				tc.Status.TiKV.Phase = v1alpha1.UpgradePhase
+				tc.Status.TiDB.FailureMembers = map[string]v1alpha1.TiDBFailureMember{
+					"tidb-0": {CreatedAt: metav1.Now(), PodName: "tidb-0"},
+					"tidb-1": {CreatedAt: metav1.Now(), PodName: "tidb-1"},
+				}
+			},
+			errWhenUpdateStatefulSet: false,
+			err:                      false,
+			expectStatefulSetFn: func(g *GomegaWithT, set *apps.StatefulSet, tc *v1alpha1.TidbCluster, err error) {
+				g.Expect(len(tc.Status.TiDB.FailureMembers)).To(Equal(0))
+				g.Expect(*set.Spec.Replicas).To(Equal(int32(0)))
+			},
+		},
+	}
+
+	for i := range tests {
+		testFn(&tests[i], t)
 	}
 }

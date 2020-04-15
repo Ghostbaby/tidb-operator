@@ -86,7 +86,7 @@ func TestOrphanPodsCleanerClean(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "pod-1",
 						Namespace: metav1.NamespaceDefault,
-						Labels:    label.New().Instance(tc.GetLabels()[label.InstanceLabelKey]).TiDB().Labels(),
+						Labels:    label.New().Instance(tc.GetInstanceName()).TiDB().Labels(),
 					},
 				},
 			},
@@ -104,7 +104,7 @@ func TestOrphanPodsCleanerClean(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "pod-1",
 						Namespace: metav1.NamespaceDefault,
-						Labels:    label.New().Instance(tc.GetLabels()[label.InstanceLabelKey]).PD().Labels(),
+						Labels:    label.New().Instance(tc.GetInstanceName()).PD().Labels(),
 					},
 					Status: corev1.PodStatus{
 						Phase: corev1.PodPending,
@@ -125,7 +125,7 @@ func TestOrphanPodsCleanerClean(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "pod-1",
 						Namespace: metav1.NamespaceDefault,
-						Labels:    label.New().Instance(tc.GetLabels()[label.InstanceLabelKey]).PD().Labels(),
+						Labels:    label.New().Instance(tc.GetInstanceName()).PD().Labels(),
 					},
 					Spec: corev1.PodSpec{
 						Volumes: []corev1.Volume{
@@ -158,7 +158,7 @@ func TestOrphanPodsCleanerClean(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "pod-1",
 						Namespace: metav1.NamespaceDefault,
-						Labels:    label.New().Instance(tc.GetLabels()[label.InstanceLabelKey]).PD().Labels(),
+						Labels:    label.New().Instance(tc.GetInstanceName()).PD().Labels(),
 					},
 					Spec: corev1.PodSpec{
 						Volumes: []corev1.Volume{
@@ -198,7 +198,7 @@ func TestOrphanPodsCleanerClean(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "pod-1",
 						Namespace: metav1.NamespaceDefault,
-						Labels:    label.New().Instance(tc.GetLabels()[label.InstanceLabelKey]).PD().Labels(),
+						Labels:    label.New().Instance(tc.GetInstanceName()).PD().Labels(),
 					},
 					Spec: corev1.PodSpec{
 						Volumes: []corev1.Volume{
@@ -227,13 +227,15 @@ func TestOrphanPodsCleanerClean(t *testing.T) {
 			},
 		},
 		{
-			name: "pvc is not found but pod is not pending",
+			// in theory, this is is possible because we can't check the PVC
+			// and pod in an atomic operation.
+			name: "pvc is not found but pod has been scheduled",
 			pods: []*corev1.Pod{
 				{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "pod-1",
 						Namespace: metav1.NamespaceDefault,
-						Labels:    label.New().Instance(tc.GetLabels()[label.InstanceLabelKey]).PD().Labels(),
+						Labels:    label.New().Instance(tc.GetInstanceName()).PD().Labels(),
 					},
 					Spec: corev1.PodSpec{
 						Volumes: []corev1.Volume{
@@ -246,9 +248,7 @@ func TestOrphanPodsCleanerClean(t *testing.T) {
 								},
 							},
 						},
-					},
-					Status: corev1.PodStatus{
-						Phase: corev1.PodRunning,
+						NodeName: "foobar",
 					},
 				},
 			},
@@ -256,7 +256,7 @@ func TestOrphanPodsCleanerClean(t *testing.T) {
 			expectFn: func(g *GomegaWithT, skipReason map[string]string, opc *orphanPodsCleaner, err error) {
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(len(skipReason)).To(Equal(1))
-				g.Expect(skipReason["pod-1"]).To(Equal(skipReasonOrphanPodsCleanerPodIsNotPending))
+				g.Expect(skipReason["pod-1"]).To(Equal(skipReasonOrphanPodsCleanerPodHasBeenScheduled))
 			},
 		},
 		{
@@ -268,7 +268,7 @@ func TestOrphanPodsCleanerClean(t *testing.T) {
 						UID:             "pod-1-uid",
 						ResourceVersion: "1",
 						Namespace:       metav1.NamespaceDefault,
-						Labels:          label.New().Instance(tc.GetLabels()[label.InstanceLabelKey]).PD().Labels(),
+						Labels:          label.New().Instance(tc.GetInstanceName()).PD().Labels(),
 					},
 					Spec: corev1.PodSpec{
 						Volumes: []corev1.Volume{
@@ -294,7 +294,7 @@ func TestOrphanPodsCleanerClean(t *testing.T) {
 						UID:             "pod-1-uid",
 						ResourceVersion: "2",
 						Namespace:       metav1.NamespaceDefault,
-						Labels:          label.New().Instance(tc.GetLabels()[label.InstanceLabelKey]).PD().Labels(),
+						Labels:          label.New().Instance(tc.GetInstanceName()).PD().Labels(),
 					},
 					Spec: corev1.PodSpec{
 						Volumes: []corev1.Volume{
@@ -327,7 +327,7 @@ func TestOrphanPodsCleanerClean(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "pod-1",
 						Namespace: metav1.NamespaceDefault,
-						Labels:    label.New().Instance(tc.GetLabels()[label.InstanceLabelKey]).PD().Labels(),
+						Labels:    label.New().Instance(tc.GetInstanceName()).PD().Labels(),
 					},
 					Spec: corev1.PodSpec{
 						Volumes: []corev1.Volume{
@@ -361,7 +361,7 @@ func TestOrphanPodsCleanerClean(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "pod-1",
 						Namespace: metav1.NamespaceDefault,
-						Labels:    label.New().Instance(tc.GetLabels()[label.InstanceLabelKey]).PD().Labels(),
+						Labels:    label.New().Instance(tc.GetInstanceName()).PD().Labels(),
 					},
 					Spec: corev1.PodSpec{
 						Volumes: []corev1.Volume{
@@ -383,7 +383,7 @@ func TestOrphanPodsCleanerClean(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "pod-2",
 						Namespace: metav1.NamespaceDefault,
-						Labels:    label.New().Instance(tc.GetLabels()[label.InstanceLabelKey]).TiKV().Labels(),
+						Labels:    label.New().Instance(tc.GetInstanceName()).TiKV().Labels(),
 					},
 					Spec: corev1.PodSpec{
 						Volumes: []corev1.Volume{
@@ -405,7 +405,7 @@ func TestOrphanPodsCleanerClean(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "pod-3",
 						Namespace: metav1.NamespaceDefault,
-						Labels:    label.New().Instance(tc.GetLabels()[label.InstanceLabelKey]).TiKV().Labels(),
+						Labels:    label.New().Instance(tc.GetInstanceName()).TiKV().Labels(),
 					},
 					Spec: corev1.PodSpec{
 						Volumes: []corev1.Volume{
@@ -427,7 +427,7 @@ func TestOrphanPodsCleanerClean(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "pod-4",
 						Namespace: metav1.NamespaceDefault,
-						Labels:    label.New().Instance(tc.GetLabels()[label.InstanceLabelKey]).TiDB().Labels(),
+						Labels:    label.New().Instance(tc.GetInstanceName()).TiDB().Labels(),
 					},
 					Spec: corev1.PodSpec{
 						Volumes: []corev1.Volume{

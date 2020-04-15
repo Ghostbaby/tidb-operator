@@ -22,7 +22,6 @@ import (
 	"github.com/google/go-cmp/cmp"
 	. "github.com/onsi/gomega"
 	"github.com/pingcap/kvproto/pkg/metapb"
-	"github.com/pingcap/pd/pkg/typeutil"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/client/clientset/versioned/fake"
 	informers "github.com/pingcap/tidb-operator/pkg/client/informers/externalversions"
@@ -33,12 +32,14 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	kubeinformers "k8s.io/client-go/informers"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/utils/pointer"
 )
 
 func TestTiKVMemberManagerSyncCreate(t *testing.T) {
@@ -78,7 +79,7 @@ func TestTiKVMemberManagerSyncCreate(t *testing.T) {
 		pdClient.AddReaction(pdapi.GetConfigActionType, func(action *pdapi.Action) (interface{}, error) {
 			return &v1alpha1.PDConfig{
 				Replication: &v1alpha1.PDReplicationConfig{
-					LocationLabels: typeutil.StringSlice{"region", "zone", "rack", "host"},
+					LocationLabels: []string{"region", "zone", "rack", "host"},
 				},
 			}, nil
 		})
@@ -157,19 +158,6 @@ func TestTiKVMemberManagerSyncCreate(t *testing.T) {
 			tombstoneStores:              &pdapi.StoresInfo{Count: 0, Stores: []*pdapi.StoreInfo{}},
 		},
 		{
-			name: "tidbcluster's storage format is wrong",
-			prepare: func(tc *v1alpha1.TidbCluster) {
-				tc.Spec.TiKV.Requests.Storage = "100xxxxi"
-			},
-			errWhenCreateStatefulSet:     false,
-			errWhenCreateTiKVPeerService: false,
-			err:                          true,
-			tikvPeerSvcCreated:           true,
-			setCreated:                   false,
-			pdStores:                     &pdapi.StoresInfo{Count: 0, Stores: []*pdapi.StoreInfo{}},
-			tombstoneStores:              &pdapi.StoresInfo{Count: 0, Stores: []*pdapi.StoreInfo{}},
-		},
-		{
 			name:                         "error when create statefulset",
 			prepare:                      nil,
 			errWhenCreateStatefulSet:     true,
@@ -231,9 +219,9 @@ func TestTiKVMemberManagerSyncUpdate(t *testing.T) {
 
 		tkmm, fakeSetControl, fakeSvcControl, pdClient, _, _ := newFakeTiKVMemberManager(tc)
 		pdClient.AddReaction(pdapi.GetConfigActionType, func(action *pdapi.Action) (interface{}, error) {
-			return &v1alpha1.PDConfig{
-				Replication: &v1alpha1.PDReplicationConfig{
-					LocationLabels: typeutil.StringSlice{"region", "zone", "rack", "host"},
+			return &pdapi.PDConfigFromAPI{
+				Replication: &pdapi.PDReplicationConfig{
+					LocationLabels: []string{"region", "zone", "rack", "host"},
 				},
 			}, nil
 		})
@@ -332,20 +320,6 @@ func TestTiKVMemberManagerSyncUpdate(t *testing.T) {
 			},
 		},
 		{
-			name: "tidbcluster's storage format is wrong",
-			modify: func(tc *v1alpha1.TidbCluster) {
-				tc.Spec.TiKV.Requests.Storage = "100xxxxi"
-				tc.Status.PD.Phase = v1alpha1.NormalPhase
-			},
-			pdStores:                     &pdapi.StoresInfo{Count: 0, Stores: []*pdapi.StoreInfo{}},
-			tombstoneStores:              &pdapi.StoresInfo{Count: 0, Stores: []*pdapi.StoreInfo{}},
-			errWhenUpdateStatefulSet:     false,
-			errWhenUpdateTiKVPeerService: false,
-			err:                          true,
-			expectTiKVPeerServiceFn:      nil,
-			expectStatefulSetFn:          nil,
-		},
-		{
 			name: "error when update statefulset",
 			modify: func(tc *v1alpha1.TidbCluster) {
 				tc.Spec.TiKV.Replicas = 5
@@ -424,7 +398,7 @@ func TestTiKVMemberManagerTiKVStatefulSetIsUpgrading(t *testing.T) {
 					Name:        ordinalPodName(v1alpha1.TiKVMemberType, tc.GetName(), 0),
 					Namespace:   metav1.NamespaceDefault,
 					Annotations: map[string]string{},
-					Labels:      label.New().Instance(tc.GetLabels()[label.InstanceLabelKey]).TiKV().Labels(),
+					Labels:      label.New().Instance(tc.GetInstanceName()).TiKV().Labels(),
 				},
 			}
 			if test.updatePod != nil {
@@ -507,9 +481,9 @@ func TestTiKVMemberManagerSetStoreLabelsForTiKV(t *testing.T) {
 		tc := newTidbClusterForPD()
 		pmm, _, _, pdClient, podIndexer, nodeIndexer := newFakeTiKVMemberManager(tc)
 		pdClient.AddReaction(pdapi.GetConfigActionType, func(action *pdapi.Action) (interface{}, error) {
-			return &v1alpha1.PDConfig{
-				Replication: &v1alpha1.PDReplicationConfig{
-					LocationLabels: typeutil.StringSlice{"region", "zone", "rack", "host"},
+			return &pdapi.PDConfigFromAPI{
+				Replication: &pdapi.PDReplicationConfig{
+					LocationLabels: []string{"region", "zone", "rack", "host"},
 				},
 			}, nil
 		})
@@ -540,7 +514,7 @@ func TestTiKVMemberManagerSetStoreLabelsForTiKV(t *testing.T) {
 		if test.hasPod {
 			pod := &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "pod-1",
+					Name:      "test-tikv-1",
 					Namespace: metav1.NamespaceDefault,
 				},
 				Spec: corev1.PodSpec{
@@ -638,7 +612,7 @@ func TestTiKVMemberManagerSetStoreLabelsForTiKV(t *testing.T) {
 						Store: &pdapi.MetaStore{
 							Store: &metapb.Store{
 								Id:      333,
-								Address: "pod-1.ns-1",
+								Address: fmt.Sprintf("%s-tikv-1.%s-tikv-peer.%s.svc:20160", "test", "test", "default"),
 							},
 							StateName: "Up",
 						},
@@ -667,7 +641,7 @@ func TestTiKVMemberManagerSetStoreLabelsForTiKV(t *testing.T) {
 						Store: &pdapi.MetaStore{
 							Store: &metapb.Store{
 								Id:      333,
-								Address: "pod-1.ns-1",
+								Address: fmt.Sprintf("%s-tikv-1.%s-tikv-peer.%s.svc:20160", "test", "test", "default"),
 							},
 							StateName: "Up",
 						},
@@ -695,7 +669,7 @@ func TestTiKVMemberManagerSetStoreLabelsForTiKV(t *testing.T) {
 						Store: &pdapi.MetaStore{
 							Store: &metapb.Store{
 								Id:      333,
-								Address: "pod-1.ns-1",
+								Address: fmt.Sprintf("%s-tikv-1.%s-tikv-peer.%s.svc:20160", "test", "test", "default"),
 								Labels: []*metapb.StoreLabel{
 									{
 										Key:   "region",
@@ -741,7 +715,7 @@ func TestTiKVMemberManagerSetStoreLabelsForTiKV(t *testing.T) {
 						Store: &pdapi.MetaStore{
 							Store: &metapb.Store{
 								Id:      333,
-								Address: "pod-1.ns-1",
+								Address: fmt.Sprintf("%s-tikv-1.%s-tikv-peer.%s.svc:20160", "test", "test", "default"),
 								Labels: []*metapb.StoreLabel{
 									{
 										Key:   "region",
@@ -775,7 +749,7 @@ func TestTiKVMemberManagerSetStoreLabelsForTiKV(t *testing.T) {
 						Store: &pdapi.MetaStore{
 							Store: &metapb.Store{
 								Id:      333,
-								Address: "pod-1.ns-1",
+								Address: fmt.Sprintf("%s-tikv-1.%s-tikv-peer.%s.svc:20160", "test", "test", "default"),
 								Labels: []*metapb.StoreLabel{
 									{
 										Key:   "region",
@@ -1033,6 +1007,7 @@ func TestTiKVMemberManagerSyncTidbClusterStatus(t *testing.T) {
 					LastHeartbeatTime: now,
 				}
 			},
+
 			upgradingFn: func(lister corelisters.PodLister, controlInterface pdapi.PDControlInterface, set *apps.StatefulSet, cluster *v1alpha1.TidbCluster) (bool, error) {
 				return false, nil
 			},
@@ -1043,7 +1018,7 @@ func TestTiKVMemberManagerSyncTidbClusterStatus(t *testing.T) {
 						Store: &pdapi.MetaStore{
 							Store: &metapb.Store{
 								Id:      333,
-								Address: "pod-1.ns-1",
+								Address: fmt.Sprintf("%s-tikv-1.%s-tikv-peer.%s.svc:20160", "test", "test", "default"),
 							},
 						},
 						Status: &pdapi.StoreStatus{
@@ -1083,7 +1058,7 @@ func TestTiKVMemberManagerSyncTidbClusterStatus(t *testing.T) {
 						Store: &pdapi.MetaStore{
 							Store: &metapb.Store{
 								Id:      333,
-								Address: "pod-1.ns-1",
+								Address: fmt.Sprintf("%s-tikv-1.%s-tikv-peer.%s.svc:20160", "test", "test", "default"),
 							},
 						},
 						Status: &pdapi.StoreStatus{
@@ -1123,7 +1098,7 @@ func TestTiKVMemberManagerSyncTidbClusterStatus(t *testing.T) {
 						Store: &pdapi.MetaStore{
 							Store: &metapb.Store{
 								Id:      333,
-								Address: "pod-1.ns-1",
+								Address: fmt.Sprintf("%s-tikv-1.%s-tikv-peer.%s.svc:20160", "test", "test", "default"),
 							},
 						},
 						Status: &pdapi.StoreStatus{
@@ -1161,7 +1136,7 @@ func TestTiKVMemberManagerSyncTidbClusterStatus(t *testing.T) {
 						Store: &pdapi.MetaStore{
 							Store: &metapb.Store{
 								Id:      333,
-								Address: "pod-1.ns-1",
+								Address: fmt.Sprintf("%s-tikv-1.%s-tikv-peer.%s.svc:20160", "test", "test", "default"),
 							},
 						},
 						Status: &pdapi.StoreStatus{
@@ -1201,7 +1176,7 @@ func TestTiKVMemberManagerSyncTidbClusterStatus(t *testing.T) {
 						Store: &pdapi.MetaStore{
 							Store: &metapb.Store{
 								Id:      333,
-								Address: "pod-1.ns-1",
+								Address: fmt.Sprintf("%s-tikv-1.%s-tikv-peer.%s.svc:20160", "test", "test", "default"),
 							},
 							StateName: "Up",
 						},
@@ -1242,7 +1217,7 @@ func TestTiKVMemberManagerSyncTidbClusterStatus(t *testing.T) {
 						Store: &pdapi.MetaStore{
 							Store: &metapb.Store{
 								Id:      333,
-								Address: "pod-1.ns-1",
+								Address: fmt.Sprintf("%s-tikv-1.%s-tikv-peer.%s.svc:20160", "test", "test", "default"),
 							},
 							StateName: "Down",
 						},
@@ -1283,7 +1258,7 @@ func TestTiKVMemberManagerSyncTidbClusterStatus(t *testing.T) {
 						Store: &pdapi.MetaStore{
 							Store: &metapb.Store{
 								Id:      333,
-								Address: "pod-1.ns-1",
+								Address: fmt.Sprintf("%s-tikv-1.%s-tikv-peer.%s.svc:20160", "test", "test", "default"),
 							},
 							StateName: "Up",
 						},
@@ -1320,7 +1295,7 @@ func TestTiKVMemberManagerSyncTidbClusterStatus(t *testing.T) {
 						Store: &pdapi.MetaStore{
 							Store: &metapb.Store{
 								Id:      333,
-								Address: "pod-1.ns-1",
+								Address: fmt.Sprintf("%s-tikv-1.%s-tikv-peer.%s.svc:20160", "test", "test", "default"),
 							},
 							StateName: "Up",
 						},
@@ -1337,7 +1312,7 @@ func TestTiKVMemberManagerSyncTidbClusterStatus(t *testing.T) {
 						Store: &pdapi.MetaStore{
 							Store: &metapb.Store{
 								Id:      333,
-								Address: "pod-1.ns-1",
+								Address: fmt.Sprintf("%s-tikv-1.%s-tikv-peer.%s.svc:20160", "test", "test", "default"),
 							},
 							StateName: "Tombstone",
 						},
@@ -1379,6 +1354,7 @@ func newFakeTiKVMemberManager(tc *v1alpha1.TidbCluster) (
 	nodeInformer := kubeinformers.NewSharedInformerFactory(kubeCli, 0).Core().V1().Nodes()
 	tikvScaler := NewFakeTiKVScaler()
 	tikvUpgrader := NewFakeTiKVUpgrader()
+	genericControl := controller.NewFakeGenericControl()
 
 	tmm := &tikvMemberManager{
 		pdControl:    pdControl,
@@ -1386,6 +1362,7 @@ func newFakeTiKVMemberManager(tc *v1alpha1.TidbCluster) (
 		nodeLister:   nodeInformer.Lister(),
 		setControl:   setControl,
 		svcControl:   svcControl,
+		typedControl: controller.NewTypedControl(genericControl),
 		setLister:    setInformer.Lister(),
 		svcLister:    svcInformer.Lister(),
 		tikvScaler:   tikvScaler,
@@ -1424,7 +1401,7 @@ func TestGetNewServiceForTidbCluster(t *testing.T) {
 					Labels: map[string]string{
 						"app.kubernetes.io/name":       "tidb-cluster",
 						"app.kubernetes.io/managed-by": "tidb-operator",
-						"app.kubernetes.io/instance":   "",
+						"app.kubernetes.io/instance":   "foo",
 						"app.kubernetes.io/component":  "tikv",
 					},
 					OwnerReferences: []metav1.OwnerReference{
@@ -1455,7 +1432,7 @@ func TestGetNewServiceForTidbCluster(t *testing.T) {
 					Selector: map[string]string{
 						"app.kubernetes.io/name":       "tidb-cluster",
 						"app.kubernetes.io/managed-by": "tidb-operator",
-						"app.kubernetes.io/instance":   "",
+						"app.kubernetes.io/instance":   "foo",
 						"app.kubernetes.io/component":  "tikv",
 					},
 					PublishNotReadyAddresses: true,
@@ -1543,12 +1520,88 @@ func TestGetNewTiKVSetForTidbCluster(t *testing.T) {
 			},
 			testSts: testHostNetwork(t, false, ""),
 		},
+		{
+			name: "tikv delete slots",
+			tc: v1alpha1.TidbCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "tc",
+					Namespace: "ns",
+					Annotations: map[string]string{
+						label.AnnTiKVDeleteSlots: "[0,1]",
+					},
+				},
+				Spec: v1alpha1.TidbClusterSpec{
+					TiDB: v1alpha1.TiDBSpec{},
+				},
+			},
+			testSts: testAnnotations(t, map[string]string{"delete-slots": "[0,1]"}),
+		},
+		{
+			name: "tikv should respect resources config",
+			tc: v1alpha1.TidbCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "tc",
+					Namespace: "ns",
+				},
+				Spec: v1alpha1.TidbClusterSpec{
+					TiKV: v1alpha1.TiKVSpec{
+						ResourceRequirements: corev1.ResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceCPU:              resource.MustParse("1"),
+								corev1.ResourceMemory:           resource.MustParse("2Gi"),
+								corev1.ResourceEphemeralStorage: resource.MustParse("10Gi"),
+								corev1.ResourceStorage:          resource.MustParse("100Gi"),
+							},
+							Limits: corev1.ResourceList{
+								corev1.ResourceCPU:              resource.MustParse("1"),
+								corev1.ResourceMemory:           resource.MustParse("2Gi"),
+								corev1.ResourceEphemeralStorage: resource.MustParse("10Gi"),
+								corev1.ResourceStorage:          resource.MustParse("100Gi"),
+							},
+						},
+					},
+				},
+			},
+			testSts: func(sts *apps.StatefulSet) {
+				g := NewGomegaWithT(t)
+				g.Expect(sts.Spec.VolumeClaimTemplates[0].Spec.Resources).To(Equal(corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceStorage: resource.MustParse("100Gi"),
+					},
+				}))
+				nameToContainer := MapContainers(&sts.Spec.Template.Spec)
+				tikvContainer := nameToContainer[v1alpha1.TiKVMemberType.String()]
+				g.Expect(tikvContainer.Resources).To(Equal(corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceCPU:              resource.MustParse("1"),
+						corev1.ResourceMemory:           resource.MustParse("2Gi"),
+						corev1.ResourceEphemeralStorage: resource.MustParse("10Gi"),
+					},
+					Limits: corev1.ResourceList{
+						corev1.ResourceCPU:              resource.MustParse("1"),
+						corev1.ResourceMemory:           resource.MustParse("2Gi"),
+						corev1.ResourceEphemeralStorage: resource.MustParse("10Gi"),
+					},
+				}))
+				var capacityEnvVar corev1.EnvVar
+				for i := range tikvContainer.Env {
+					if tikvContainer.Env[i].Name == "CAPACITY" {
+						capacityEnvVar = tikvContainer.Env[i]
+						break
+					}
+				}
+				g.Expect(capacityEnvVar).To(Equal(corev1.EnvVar{
+					Name:  "CAPACITY",
+					Value: "100GB",
+				}), "Expected the CAPACITY of tikv is properly set")
+			},
+		},
 		// TODO add more tests
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sts, err := getNewTiKVSetForTidbCluster(&tt.tc)
+			sts, err := getNewTiKVSetForTidbCluster(&tt.tc, nil)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("error %v, wantErr %v", err, tt.wantErr)
 			}
@@ -1804,7 +1857,7 @@ func TestTiKVInitContainers(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sts, err := getNewTiKVSetForTidbCluster(&tt.tc)
+			sts, err := getNewTiKVSetForTidbCluster(&tt.tc, nil)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("error %v, wantErr %v", err, tt.wantErr)
 			}
@@ -1819,6 +1872,104 @@ func TestTiKVInitContainers(t *testing.T) {
 				t.Errorf("unexpected SecurityContext in Statefulset (want %#v, got nil)", *tt.expectedSecurity)
 			} else if diff := cmp.Diff(*(tt.expectedSecurity), *(sts.Spec.Template.Spec.SecurityContext)); diff != "" {
 				t.Errorf("unexpected SecurityContext in Statefulset (-want, +got): %s", diff)
+			}
+		})
+	}
+}
+
+func TestGetTiKVConfigMap(t *testing.T) {
+	g := NewGomegaWithT(t)
+	updateStrategy := v1alpha1.ConfigUpdateStrategyInPlace
+	testCases := []struct {
+		name     string
+		tc       v1alpha1.TidbCluster
+		expected *corev1.ConfigMap
+	}{
+		{
+			name: "TiKV config is nil",
+			tc: v1alpha1.TidbCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "foo",
+					Namespace: "ns",
+				},
+			},
+			expected: nil,
+		},
+		{
+			name: "basic",
+			tc: v1alpha1.TidbCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "foo",
+					Namespace: "ns",
+				},
+				Spec: v1alpha1.TidbClusterSpec{
+					TiKV: v1alpha1.TiKVSpec{
+						ComponentSpec: v1alpha1.ComponentSpec{
+							ConfigUpdateStrategy: &updateStrategy,
+						},
+						Config: &v1alpha1.TiKVConfig{
+							Raftstore: &v1alpha1.TiKVRaftstoreConfig{
+								SyncLog:              pointer.BoolPtr(false),
+								RaftBaseTickInterval: "1s",
+							},
+							Server: &v1alpha1.TiKVServerConfig{
+								GrpcKeepaliveTimeout: "30s",
+							},
+						},
+					},
+				},
+			},
+			expected: &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "foo-tikv",
+					Namespace: "ns",
+					Labels: map[string]string{
+						"app.kubernetes.io/name":       "tidb-cluster",
+						"app.kubernetes.io/managed-by": "tidb-operator",
+						"app.kubernetes.io/instance":   "foo",
+						"app.kubernetes.io/component":  "tikv",
+					},
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: "pingcap.com/v1alpha1",
+							Kind:       "TidbCluster",
+							Name:       "foo",
+							UID:        "",
+							Controller: func(b bool) *bool {
+								return &b
+							}(true),
+							BlockOwnerDeletion: func(b bool) *bool {
+								return &b
+							}(true),
+						},
+					},
+				},
+				Data: map[string]string{
+					"startup-script": "",
+					"config-file": `[server]
+  grpc-keepalive-timeout = "30s"
+
+[raftstore]
+  sync-log = false
+  raft-base-tick-interval = "1s"
+`,
+				},
+			},
+		},
+	}
+
+	for _, tt := range testCases {
+		t.Run(tt.name, func(t *testing.T) {
+			cm, err := getTikVConfigMap(&tt.tc)
+			g.Expect(err).To(Succeed())
+			if tt.expected == nil {
+				g.Expect(cm).To(BeNil())
+				return
+			}
+			// startup-script is better to be tested in e2e
+			cm.Data["startup-script"] = ""
+			if diff := cmp.Diff(*tt.expected, *cm); diff != "" {
+				t.Errorf("unexpected plugin configuration (-want, +got): %s", diff)
 			}
 		})
 	}

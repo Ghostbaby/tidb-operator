@@ -14,69 +14,26 @@
 package util
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
 
+	"github.com/pingcap/advanced-statefulset/pkg/apis/apps/v1/helper"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
+	"github.com/pingcap/tidb-operator/pkg/features"
+	"github.com/pingcap/tidb-operator/pkg/label"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
-	glog "k8s.io/klog"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/sets"
 )
 
-// ResourceRequirement creates ResourceRequirements for MemberSpec
-// Optionally pass in a default value
-func ResourceRequirement(resources v1alpha1.Resources, defaultRequests ...corev1.ResourceRequirements) corev1.ResourceRequirements {
-	rr := corev1.ResourceRequirements{}
-	if len(defaultRequests) > 0 {
-		defaultRequest := defaultRequests[0]
-		rr.Requests = make(map[corev1.ResourceName]resource.Quantity)
-		rr.Requests[corev1.ResourceCPU] = defaultRequest.Requests[corev1.ResourceCPU]
-		rr.Requests[corev1.ResourceMemory] = defaultRequest.Requests[corev1.ResourceMemory]
-		rr.Limits = make(map[corev1.ResourceName]resource.Quantity)
-		rr.Limits[corev1.ResourceCPU] = defaultRequest.Limits[corev1.ResourceCPU]
-		rr.Limits[corev1.ResourceMemory] = defaultRequest.Limits[corev1.ResourceMemory]
-	}
-	if resources.Requests != nil {
-		if rr.Requests == nil {
-			rr.Requests = make(map[corev1.ResourceName]resource.Quantity)
-		}
-		if resources.Requests.CPU != "" {
-			if q, err := resource.ParseQuantity(resources.Requests.CPU); err != nil {
-				glog.Errorf("failed to parse CPU resource %s to quantity: %v", resources.Requests.CPU, err)
-			} else {
-				rr.Requests[corev1.ResourceCPU] = q
-			}
-		}
-		if resources.Requests.Memory != "" {
-			if q, err := resource.ParseQuantity(resources.Requests.Memory); err != nil {
-				glog.Errorf("failed to parse memory resource %s to quantity: %v", resources.Requests.Memory, err)
-			} else {
-				rr.Requests[corev1.ResourceMemory] = q
-			}
-		}
-	}
-	if resources.Limits != nil {
-		if rr.Limits == nil {
-			rr.Limits = make(map[corev1.ResourceName]resource.Quantity)
-		}
-		if resources.Limits.CPU != "" {
-			if q, err := resource.ParseQuantity(resources.Limits.CPU); err != nil {
-				glog.Errorf("failed to parse CPU resource %s to quantity: %v", resources.Limits.CPU, err)
-			} else {
-				rr.Limits[corev1.ResourceCPU] = q
-			}
-		}
-		if resources.Limits.Memory != "" {
-			if q, err := resource.ParseQuantity(resources.Limits.Memory); err != nil {
-				glog.Errorf("failed to parse memory resource %s to quantity: %v", resources.Limits.Memory, err)
-			} else {
-				rr.Limits[corev1.ResourceMemory] = q
-			}
-		}
-	}
-	return rr
-}
+var (
+	ClusterClientTLSPath = "/var/lib/cluster-client-tls"
+	TiDBClientTLSPath    = "/var/lib/tidb-client-tls"
+)
 
 func GetOrdinalFromPodName(podName string) (int32, error) {
 	ordinalStr := podName[strings.LastIndex(podName, "-")+1:]
@@ -87,20 +44,61 @@ func GetOrdinalFromPodName(podName string) (int32, error) {
 	return int32(ordinalInt), nil
 }
 
-func GetNextOrdinalPodName(podName string, ordinal int32) string {
-	basicStr := podName[:strings.LastIndex(podName, "-")]
-	return fmt.Sprintf("%s-%d", basicStr, ordinal+1)
-}
-
-func IsPodOrdinalNotExceedReplicas(pod *corev1.Pod, specReplicas int32) (bool, error) {
+func IsPodOrdinalNotExceedReplicas(pod *corev1.Pod, sts *appsv1.StatefulSet) (bool, error) {
 	ordinal, err := GetOrdinalFromPodName(pod.Name)
 	if err != nil {
 		return false, err
 	}
-	if ordinal < specReplicas {
-		return true, nil
+	if features.DefaultFeatureGate.Enabled(features.AdvancedStatefulSet) {
+		return helper.GetPodOrdinals(*sts.Spec.Replicas, sts).Has(ordinal), nil
 	}
-	return false, nil
+	return ordinal < *sts.Spec.Replicas, nil
+}
+
+func getDeleteSlots(tc *v1alpha1.TidbCluster, annKey string) (deleteSlots sets.Int32) {
+	deleteSlots = sets.NewInt32()
+	annotations := tc.GetAnnotations()
+	if annotations == nil {
+		return
+	}
+	value, ok := annotations[annKey]
+	if !ok {
+		return
+	}
+	var slice []int32
+	err := json.Unmarshal([]byte(value), &slice)
+	if err != nil {
+		return
+	}
+	deleteSlots.Insert(slice...)
+	return
+}
+
+// GetPodOrdinals gets desired ordials of member in given TidbCluster.
+func GetPodOrdinals(tc *v1alpha1.TidbCluster, memberType v1alpha1.MemberType) (sets.Int32, error) {
+	var ann string
+	var replicas int32
+	if memberType == v1alpha1.PDMemberType {
+		ann = label.AnnPDDeleteSlots
+		replicas = tc.Spec.PD.Replicas
+	} else if memberType == v1alpha1.TiKVMemberType {
+		ann = label.AnnTiKVDeleteSlots
+		replicas = tc.Spec.TiKV.Replicas
+	} else if memberType == v1alpha1.TiDBMemberType {
+		ann = label.AnnTiDBDeleteSlots
+		replicas = tc.Spec.TiDB.Replicas
+	} else {
+		return nil, fmt.Errorf("unknown member type %v", memberType)
+	}
+	deleteSlots := getDeleteSlots(tc, ann)
+	maxReplicaCount, deleteSlots := helper.GetMaxReplicaCountAndDeleteSlots(replicas, deleteSlots)
+	podOrdinals := sets.NewInt32()
+	for i := int32(0); i < maxReplicaCount; i++ {
+		if !deleteSlots.Has(i) {
+			podOrdinals.Insert(i)
+		}
+	}
+	return podOrdinals, nil
 }
 
 func OrdinalPVCName(memberType v1alpha1.MemberType, setName string, ordinal int32) string {
@@ -118,4 +116,113 @@ func IsSubMapOf(first map[string]string, second map[string]string) bool {
 		}
 	}
 	return true
+}
+
+func GetPodName(tc *v1alpha1.TidbCluster, memberType v1alpha1.MemberType, ordinal int32) string {
+	return fmt.Sprintf("%s-%s-%d", tc.Name, memberType.String(), ordinal)
+}
+
+func IsStatefulSetUpgrading(set *appsv1.StatefulSet) bool {
+	return !(set.Status.CurrentRevision == set.Status.UpdateRevision)
+}
+
+func IsStatefulSetScaling(set *appsv1.StatefulSet) bool {
+	return !(set.Status.Replicas == *set.Spec.Replicas)
+}
+
+func GetStatefulSetName(tc *v1alpha1.TidbCluster, memberType v1alpha1.MemberType) string {
+	return fmt.Sprintf("%s-%s", tc.Name, memberType.String())
+}
+
+func GetAutoScalingOutSlots(tc *v1alpha1.TidbCluster, memberType v1alpha1.MemberType) sets.Int32 {
+	s := sets.Int32{}
+	l := ""
+	switch memberType {
+	case v1alpha1.PDMemberType:
+		return s
+	case v1alpha1.TiKVMemberType:
+		l = label.AnnTiKVAutoScalingOutOrdinals
+	case v1alpha1.TiDBMemberType:
+		l = label.AnnTiDBAutoScalingOutOrdinals
+	default:
+		return s
+	}
+	if tc.Annotations == nil {
+		return s
+	}
+	v, existed := tc.Annotations[l]
+	if !existed {
+		return s
+	}
+	var slice []int32
+	err := json.Unmarshal([]byte(v), &slice)
+	if err != nil {
+		return s
+	}
+	s.Insert(slice...)
+	return s
+}
+
+func Encode(obj interface{}) (string, error) {
+	b, err := json.Marshal(obj)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+func ClusterClientTLSSecretName(tcName string) string {
+	return fmt.Sprintf("%s-cluster-client-secret", tcName)
+}
+
+func ClusterTLSSecretName(tcName, component string) string {
+	return fmt.Sprintf("%s-%s-cluster-secret", tcName, component)
+}
+
+func TiDBClientTLSSecretName(tcName string) string {
+	return fmt.Sprintf("%s-tidb-client-secret", tcName)
+}
+
+// SortEnvByName implements sort.Interface to sort env list by name.
+type SortEnvByName []corev1.EnvVar
+
+func (e SortEnvByName) Len() int {
+	return len(e)
+}
+func (e SortEnvByName) Swap(i, j int) {
+	e[i], e[j] = e[j], e[i]
+}
+
+func (e SortEnvByName) Less(i, j int) bool {
+	return e[i].Name < e[j].Name
+}
+
+// AppendEnv appends envs `b` into `a` ignoring envs whose names already exist
+// in `b`.
+// Note that this will not change relative order of envs.
+func AppendEnv(a []corev1.EnvVar, b []corev1.EnvVar) []corev1.EnvVar {
+	aMap := make(map[string]corev1.EnvVar)
+	for _, e := range a {
+		aMap[e.Name] = e
+	}
+	for _, e := range b {
+		if _, ok := aMap[e.Name]; !ok {
+			a = append(a, e)
+		}
+	}
+	return a
+}
+
+// IsOwnedByTidbCluster checks if the given object is owned by TidbCluster.
+// Schema Kind and Group are checked, Version is ignored.
+func IsOwnedByTidbCluster(obj metav1.Object) (bool, *metav1.OwnerReference) {
+	ref := metav1.GetControllerOf(obj)
+	if ref == nil {
+		return false, nil
+	}
+	gv, err := schema.ParseGroupVersion(ref.APIVersion)
+	if err != nil {
+		return false, nil
+	}
+	return ref.Kind == v1alpha1.TiDBClusterKind && gv.Group == v1alpha1.SchemeGroupVersion.Group, ref
 }

@@ -16,11 +16,11 @@ package pod
 import (
 	"testing"
 
+	"k8s.io/client-go/kubernetes"
+
 	. "github.com/onsi/gomega"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	operatorClifake "github.com/pingcap/tidb-operator/pkg/client/clientset/versioned/fake"
-	informers "github.com/pingcap/tidb-operator/pkg/client/informers/externalversions"
-	"github.com/pingcap/tidb-operator/pkg/controller"
 	"github.com/pingcap/tidb-operator/pkg/label"
 	memberUtils "github.com/pingcap/tidb-operator/pkg/manager/member"
 	"github.com/pingcap/tidb-operator/pkg/pdapi"
@@ -28,9 +28,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	kubeinformers "k8s.io/client-go/informers"
 	kubefake "k8s.io/client-go/kubernetes/fake"
-	"k8s.io/client-go/tools/cache"
+	"k8s.io/utils/pointer"
 )
 
 const (
@@ -56,7 +55,8 @@ func TestAdmitPod(t *testing.T) {
 	testFn := func(test *testcase) {
 		t.Log(test.name)
 
-		podAdmissionControl, _, _, podIndexer, _, _ := newPodAdmissionControl()
+		kubeCli := kubefake.NewSimpleClientset()
+		podAdmissionControl := newPodAdmissionControl(kubeCli)
 		ar := newAdmissionRequest()
 		pod := newNormalPod()
 		if test.isDelete {
@@ -76,7 +76,6 @@ func TestAdmitPod(t *testing.T) {
 				label.ComponentLabelKey: label.TiKVLabelVal,
 			}
 		}
-		podIndexer.Add(pod)
 
 		resp := podAdmissionControl.AdmitPods(ar)
 		test.expectFn(g, resp)
@@ -128,30 +127,14 @@ func newAdmissionRequest() *admission.AdmissionRequest {
 	return &request
 }
 
-func newPodAdmissionControl() (*PodAdmissionControl, *controller.FakePVCControl, cache.Indexer, cache.Indexer, cache.Indexer, cache.Indexer) {
-	kubeCli := kubefake.NewSimpleClientset()
+func newPodAdmissionControl(kubeCli kubernetes.Interface) *PodAdmissionControl {
 	operatorCli := operatorClifake.NewSimpleClientset()
-	kubeInformerFactory := kubeinformers.NewSharedInformerFactory(kubeCli, 0)
-	pvcInformer := kubeInformerFactory.Core().V1().PersistentVolumeClaims()
-	pvcControl := controller.NewFakePVCControl(pvcInformer)
 	pdControl := pdapi.NewFakePDControl(kubeCli)
-	podInformer := kubeInformerFactory.Core().V1().Pods()
-	informer := informers.NewSharedInformerFactory(operatorCli, 0)
-	stsInformer := kubeInformerFactory.Apps().V1().StatefulSets()
-
 	return &PodAdmissionControl{
-			kubeCli:     kubeCli,
-			operatorCli: operatorCli,
-			pvcControl:  pvcControl,
-			pdControl:   pdControl,
-			podLister:   podInformer.Lister(),
-			tcLister:    informer.Pingcap().V1alpha1().TidbClusters().Lister(),
-			stsLister:   stsInformer.Lister(),
-		}, pvcControl,
-		pvcInformer.Informer().GetIndexer(),
-		podInformer.Informer().GetIndexer(),
-		informer.Pingcap().V1alpha1().TidbClusters().Informer().GetIndexer(),
-		stsInformer.Informer().GetIndexer()
+		kubeCli:     kubeCli,
+		operatorCli: operatorCli,
+		pdControl:   pdControl,
+	}
 }
 
 func newTidbClusterForPodAdmissionControl() *v1alpha1.TidbCluster {
@@ -172,14 +155,14 @@ func newTidbClusterForPodAdmissionControl() *v1alpha1.TidbCluster {
 					Image: "pd-test-image",
 				},
 				Replicas:         pdReplicas,
-				StorageClassName: "my-storage-class",
+				StorageClassName: pointer.StringPtr("my-storage-class"),
 			},
 			TiKV: v1alpha1.TiKVSpec{
 				ComponentSpec: v1alpha1.ComponentSpec{
 					Image: "tikv-test-image",
 				},
 				Replicas:         tikvReplicas,
-				StorageClassName: "my-storage-class",
+				StorageClassName: pointer.StringPtr("my-storage-class"),
 			},
 		},
 		Status: v1alpha1.TidbClusterStatus{
