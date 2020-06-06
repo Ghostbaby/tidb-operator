@@ -44,6 +44,7 @@ func NewRestoreCommand() *cobra.Command {
 
 	cmd.Flags().StringVar(&ro.Namespace, "namespace", "", "Restore CR's namespace")
 	cmd.Flags().StringVar(&ro.ResourceName, "restoreName", "", "Restore CRD object name")
+	cmd.Flags().StringVar(&ro.TiKVVersion, "tikvVersion", util.DefaultVersion, "TiKV version")
 	cmd.Flags().BoolVar(&ro.TLSClient, "client-tls", false, "Whether client tls is enabled")
 	cmd.Flags().BoolVar(&ro.TLSCluster, "cluster-tls", false, "Whether cluster tls is enabled")
 	return cmd
@@ -51,7 +52,9 @@ func NewRestoreCommand() *cobra.Command {
 
 func runRestore(restoreOpts restore.Options, kubecfg string) error {
 	kubeCli, cli, err := util.NewKubeAndCRCli(kubecfg)
-	cmdutil.CheckErr(err)
+	if err != nil {
+		return err
+	}
 	options := []informers.SharedInformerOption{
 		informers.WithNamespace(restoreOpts.Namespace),
 	}

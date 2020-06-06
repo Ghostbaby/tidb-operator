@@ -61,6 +61,9 @@ const (
 	// BackupProtectionFinalizer is the name of finalizer on backups
 	BackupProtectionFinalizer string = "tidb.pingcap.com/backup-protection"
 
+	// High availability is realized based on the topology
+	AnnHATopologyKey = "pingcap.com/ha-topology-key"
+
 	// AnnFailTiDBScheduler is for injecting a failure into the TiDB custom scheduler
 	// A pod with this annotation will produce an error when scheduled.
 	AnnFailTiDBScheduler string = "tidb.pingcap.com/fail-scheduler"
@@ -98,11 +101,19 @@ const (
 	AnnTiDBDeleteSlots = "tidb.tidb.pingcap.com/delete-slots"
 	// TiKVDeleteSlots is annotation key of tikv delete slots.
 	AnnTiKVDeleteSlots = "tikv.tidb.pingcap.com/delete-slots"
+	// TiFlashDeleteSlots is annotation key of tiflash delete slots.
+	AnnTiFlashDeleteSlots = "tiflash.tidb.pingcap.com/delete-slots"
 
 	// AnnTiDBLastAutoScalingTimestamp is annotation key of tidbcluster to indicate the last timestamp for tidb auto-scaling
 	AnnTiDBLastAutoScalingTimestamp = "tidb.tidb.pingcap.com/last-autoscaling-timestamp"
 	// AnnTiKVLastAutoScalingTimestamp is annotation key of tidbclusterto which ordinal is created by tikv auto-scaling
 	AnnTiKVLastAutoScalingTimestamp = "tikv.tidb.pingcap.com/last-autoscaling-timestamp"
+
+	// AnnTiKVReadyToScaleTimestamp records timestamp when tikv ready to scale
+	AnnTiKVReadyToScaleTimestamp = "tikv.tidb.pingcap.com/ready-to-scale-timestamp"
+
+	// AnnLastSyncingTimestamp records last sync timestamp
+	AnnLastSyncingTimestamp = "tidb.pingcap.com/last-syncing-timestamp"
 
 	// AnnTiDBConsecutiveScaleOutCount describes the least consecutive count to scale-out for tidb
 	AnnTiDBConsecutiveScaleOutCount = "tidb.tidb.pingcap.com/consecutive-scale-out-count"
@@ -130,8 +141,10 @@ const (
 	TiDBLabelVal string = "tidb"
 	// TiKVLabelVal is TiKV label value
 	TiKVLabelVal string = "tikv"
-	// TiFlashLabelVal is TiKV label value
+	// TiFlashLabelVal is TiFlash label value
 	TiFlashLabelVal string = "tiflash"
+	// TiCDCLabelVal is TiCDC label value
+	TiCDCLabelVal string = "ticdc"
 	// PumpLabelVal is Pump label value
 	PumpLabelVal string = "pump"
 	// DiscoveryLabelVal is Discovery label value
@@ -313,6 +326,22 @@ func (l Label) TiKV() Label {
 func (l Label) TiFlash() Label {
 	l.Component(TiFlashLabelVal)
 	return l
+}
+
+// IsTiFlash returns whether label is a TiFlash
+func (l Label) IsTiFlash() bool {
+	return l[ComponentLabelKey] == TiFlashLabelVal
+}
+
+// TiCDC assigns ticdc to component key in label
+func (l Label) TiCDC() Label {
+	l.Component(TiCDCLabelVal)
+	return l
+}
+
+// IsTiCDC returns whether label is a TiCDC
+func (l Label) IsTiCDC() bool {
+	return l[ComponentLabelKey] == TiCDCLabelVal
 }
 
 // IsTiKV returns whether label is a TiKV

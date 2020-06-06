@@ -41,7 +41,6 @@ const (
 )
 
 type pumpMemberManager struct {
-	certControl  controller.CertControlInterface
 	setControl   controller.StatefulSetControlInterface
 	svcControl   controller.ServiceControlInterface
 	typedControl controller.TypedControlInterface
@@ -53,7 +52,6 @@ type pumpMemberManager struct {
 
 // NewPumpMemberManager returns a controller to reconcile pump clusters
 func NewPumpMemberManager(
-	certControl controller.CertControlInterface,
 	setControl controller.StatefulSetControlInterface,
 	svcControl controller.ServiceControlInterface,
 	typedControl controller.TypedControlInterface,
@@ -62,7 +60,6 @@ func NewPumpMemberManager(
 	svcLister corelisters.ServiceLister,
 	podLister corelisters.PodLister) manager.Manager {
 	return &pumpMemberManager{
-		certControl,
 		setControl,
 		svcControl,
 		typedControl,
@@ -117,6 +114,11 @@ func (pmm *pumpMemberManager) syncPumpStatefulSetForTidbCluster(tc *v1alpha1.Tid
 			return err
 		}
 		return pmm.setControl.CreateStatefulSet(tc, newPumpSet)
+	}
+
+	// Wait for PD & TiKV upgrading done
+	if tc.Status.PD.Phase == v1alpha1.UpgradePhase || tc.Status.TiKV.Phase == v1alpha1.UpgradePhase {
+		return nil
 	}
 
 	return updateStatefulSet(pmm.setControl, tc, newPumpSet, oldPumpSet)
@@ -253,6 +255,9 @@ func getNewPumpConfigMap(tc *v1alpha1.TidbCluster) (*corev1.ConfigMap, error) {
 	objMeta, _ := getPumpMeta(tc, controller.PumpMemberName)
 
 	if tc.IsTLSClusterEnabled() {
+		if spec.Config == nil {
+			spec.Config = make(map[string]interface{})
+		}
 		securityMap := spec.Config["security"]
 		security := map[string]interface{}{}
 		if securityMap != nil {

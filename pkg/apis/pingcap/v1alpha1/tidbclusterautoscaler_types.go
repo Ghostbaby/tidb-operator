@@ -18,6 +18,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+type AutoScalerPhase string
+
+const (
+	NormalAutoScalerPhase          AutoScalerPhase = "Normal"
+	ReadyToScaleOutAutoScalerPhase AutoScalerPhase = "ReadyToScaleOut"
+	ReadyToScaleInAutoScalerPhase  AutoScalerPhase = "ReadyToScaleIn"
+)
+
 // +genclient
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
@@ -76,6 +84,12 @@ type TidbClusterAutoScalerSpec struct {
 // TikvAutoScalerSpec describes the spec for tikv auto-scaling
 type TikvAutoScalerSpec struct {
 	BasicAutoScalerSpec `json:",inline"`
+
+	// ReadyToScaleThresholdSeconds represents duration that the ReadyToScale phase
+	// should last for before auto scaling.
+	// If not set, the default ReadyToScaleThresholdSeconds will be set to 30.
+	// +optional
+	ReadyToScaleThresholdSeconds *int32 `json:"readyToScaleThresholdSeconds,omitempty"`
 }
 
 // +k8s:openapi-gen=true
@@ -135,6 +149,11 @@ type BasicAutoScalerSpec struct {
 	// If not set, the default value is 5.
 	// +optional
 	ScaleInThreshold *int32 `json:"scaleInThreshold,omitempty"`
+
+	// ExternalEndpoint makes the auto-scaler controller able to query the external service
+	// to fetch the recommended replicas for TiKV/TiDB
+	// +optional
+	ExternalEndpoint *ExternalEndpoint `json:"externalEndpoint,omitempty"`
 }
 
 // +k8s:openapi-gen=true
@@ -147,8 +166,83 @@ type TidbMonitorRef struct {
 
 	// Name is the name of TidbMonitor object
 	Name string `json:"name"`
+
+	// GrafanaEnabled indicate whether the grafana is enabled for this target tidbmonitor
+	// +optional
+	GrafanaEnabled bool `json:"grafanaEnabled,omitempty"`
 }
 
-// TODO: sync status
+// +k8s:openapi-gen=true
+// TidbClusterAutoSclaerStatus describe the whole status
 type TidbClusterAutoSclaerStatus struct {
+	// Tikv describes the status for the tikv in the last auto-scaling reconciliation
+	// +optional
+	TiKV *TikvAutoScalerStatus `json:"tikv,omitempty"`
+	// Tidb describes the status for the tidb in the last auto-scaling reconciliation
+	// +optional
+	TiDB *TidbAutoScalerStatus `json:"tidb,omitempty"`
+}
+
+// +k8s:openapi-gen=true
+// TidbAutoScalerStatus describe the auto-scaling status of tidb
+type TidbAutoScalerStatus struct {
+	BasicAutoScalerStatus `json:",inline"`
+}
+
+// +k8s:openapi-gen=true
+// TikvAutoScalerStatus describe the auto-scaling status of tikv
+type TikvAutoScalerStatus struct {
+	BasicAutoScalerStatus `json:",inline"`
+}
+
+// +k8s:openapi-gen=true
+// BasicAutoScalerStatus describe the basic auto-scaling status
+type BasicAutoScalerStatus struct {
+	// Phase describes cluster auto scaling phase
+	Phase AutoScalerPhase `json:"phase,omitempty"`
+	// MetricsStatusList describes the metrics status in the last auto-scaling reconciliation
+	// +optional
+	MetricsStatusList []MetricsStatus `json:"metrics,omitempty"`
+	// CurrentReplicas describes the current replicas for the component(tidb/tikv)
+	CurrentReplicas int32 `json:"currentReplicas"`
+	// RecommendedReplicas describes the calculated replicas in the last auto-scaling reconciliation for the component(tidb/tikv)
+	// +optional
+	RecommendedReplicas *int32 `json:"recommendedReplicas,omitempty"`
+	// LastAutoScalingTimestamp describes the last auto-scaling timestamp for the component(tidb/tikv)
+	// +optional
+	LastAutoScalingTimestamp *metav1.Time `json:"lastAutoScalingTimestamp,omitempty"`
+}
+
+// +k8s:openapi-gen=true
+// MetricsStatus describe the basic metrics status in the last auto-scaling reconciliation
+type MetricsStatus struct {
+	// Name indicates the metrics name
+	Name string `json:"name"`
+	// CurrentValue indicates the value calculated in the last auto-scaling reconciliation
+	CurrentValue string `json:"currentValue"`
+	// TargetValue indicates the threshold value for this metrics in auto-scaling
+	ThresholdValue string `json:"thresholdValue"`
+}
+
+// +k8s:openapi-gen=true
+// ExternalEndpoint describes the external service endpoint
+// which provides the ability to get the tikv/tidb auto-scaling recommended replicas
+type ExternalEndpoint struct {
+	// Host indicates the external service's host
+	Host string `json:"host"`
+	// Port indicates the external service's port
+	Port int32 `json:"port"`
+	// Path indicates the external service's path
+	Path string `json:"path"`
+	// TLSSecret indicates the Secret which stores the TLS configuration. If set, the operator will use https
+	// to communicate to the external service
+	// +optional
+	TLSSecret *SecretRef `json:"tlsSecret,omitempty"`
+}
+
+// +k8s:openapi-gen=true
+// SecretRef indicates to secret ref
+type SecretRef struct {
+	Name      string `json:"name"`
+	Namespace string `json:"namespace"`
 }

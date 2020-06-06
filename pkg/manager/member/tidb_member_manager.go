@@ -14,12 +14,13 @@
 package member
 
 import (
+	"crypto/tls"
 	"fmt"
 	"path"
 	"strconv"
 	"strings"
 
-	"github.com/pingcap/advanced-statefulset/pkg/apis/apps/v1/helper"
+	"github.com/pingcap/advanced-statefulset/client/apis/apps/v1/helper"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/controller"
 	"github.com/pingcap/tidb-operator/pkg/label"
@@ -28,13 +29,13 @@ import (
 	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	v1 "k8s.io/client-go/listers/apps/v1"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/klog"
+	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 	"k8s.io/utils/pointer"
 )
 
@@ -59,11 +60,11 @@ type tidbMemberManager struct {
 	svcControl                   controller.ServiceControlInterface
 	tidbControl                  controller.TiDBControlInterface
 	typedControl                 controller.TypedControlInterface
-	certControl                  controller.CertControlInterface
 	setLister                    v1.StatefulSetLister
 	svcLister                    corelisters.ServiceLister
 	podLister                    corelisters.PodLister
 	cmLister                     corelisters.ConfigMapLister
+	secretLister                 corelisters.SecretLister
 	tidbUpgrader                 Upgrader
 	autoFailover                 bool
 	tidbFailover                 Failover
@@ -74,11 +75,11 @@ type tidbMemberManager struct {
 func NewTiDBMemberManager(setControl controller.StatefulSetControlInterface,
 	svcControl controller.ServiceControlInterface,
 	tidbControl controller.TiDBControlInterface,
-	certControl controller.CertControlInterface,
 	typedControl controller.TypedControlInterface,
 	setLister v1.StatefulSetLister,
 	svcLister corelisters.ServiceLister,
 	podLister corelisters.PodLister,
+	secretLister corelisters.SecretLister,
 	tidbUpgrader Upgrader,
 	autoFailover bool,
 	tidbFailover Failover) manager.Manager {
@@ -87,10 +88,10 @@ func NewTiDBMemberManager(setControl controller.StatefulSetControlInterface,
 		svcControl:                   svcControl,
 		tidbControl:                  tidbControl,
 		typedControl:                 typedControl,
-		certControl:                  certControl,
 		setLister:                    setLister,
 		svcLister:                    svcLister,
 		podLister:                    podLister,
+		secretLister:                 secretLister,
 		tidbUpgrader:                 tidbUpgrader,
 		autoFailover:                 autoFailover,
 		tidbFailover:                 tidbFailover,
@@ -105,7 +106,11 @@ func (tmm *tidbMemberManager) Sync(tc *v1alpha1.TidbCluster) error {
 	if !tc.TiKVIsAvailable() {
 		return controller.RequeueErrorf("TidbCluster: [%s/%s], waiting for TiKV cluster running", ns, tcName)
 	}
-
+	if tc.Spec.Pump != nil {
+		if !tc.PumpIsAvailable() {
+			return controller.RequeueErrorf("TidbCluster: [%s/%s], waiting for Pump cluster running", ns, tcName)
+		}
+	}
 	// Sync TiDB Headless Service
 	if err := tmm.syncTiDBHeadlessServiceForTidbCluster(tc); err != nil {
 		return err
@@ -116,8 +121,35 @@ func (tmm *tidbMemberManager) Sync(tc *v1alpha1.TidbCluster) error {
 		return err
 	}
 
+	if tc.Spec.TiDB.IsTLSClientEnabled() {
+		if err := tmm.checkTLSClientCert(tc); err != nil {
+			return err
+		}
+	}
+
 	// Sync TiDB StatefulSet
 	return tmm.syncTiDBStatefulSetForTidbCluster(tc)
+}
+
+func (tmm *tidbMemberManager) checkTLSClientCert(tc *v1alpha1.TidbCluster) error {
+	ns := tc.Namespace
+	secretName := tlsClientSecretName(tc)
+	secret, err := tmm.secretLister.Secrets(ns).Get(secretName)
+	if err != nil {
+		return fmt.Errorf("unable to load certificates from secret %s/%s: %v", ns, secretName, err)
+	}
+
+	clientCert, certExists := secret.Data[corev1.TLSCertKey]
+	clientKey, keyExists := secret.Data[corev1.TLSPrivateKeyKey]
+	if !certExists || !keyExists {
+		return fmt.Errorf("cert or key does not exist in secret %s/%s", ns, secretName)
+	}
+
+	_, err = tls.X509KeyPair(clientCert, clientKey)
+	if err != nil {
+		return fmt.Errorf("unable to load certificates from secret %s/%s: %v", ns, secretName, err)
+	}
+	return nil
 }
 
 func (tmm *tidbMemberManager) syncTiDBHeadlessServiceForTidbCluster(tc *v1alpha1.TidbCluster) error {
@@ -207,11 +239,8 @@ func (tmm *tidbMemberManager) syncTiDBStatefulSetForTidbCluster(tc *v1alpha1.Tid
 		}
 	}
 
-	if tmm.autoFailover && tc.Spec.TiDB.MaxFailoverCount != nil {
-		if tc.Spec.TiDB.Replicas == int32(0) && tc.Status.TiDB.FailureMembers != nil {
-			tmm.tidbFailover.Recover(tc)
-		}
-		if tc.TiDBAllPodsStarted() && tc.TiDBAllMembersReady() && tc.Status.TiDB.FailureMembers != nil {
+	if tmm.autoFailover {
+		if tmm.shouldRecover(tc) {
 			tmm.tidbFailover.Recover(tc)
 		} else if tc.TiDBAllPodsStarted() && !tc.TiDBAllMembersReady() {
 			if err := tmm.tidbFailover.Failover(tc); err != nil {
@@ -221,6 +250,32 @@ func (tmm *tidbMemberManager) syncTiDBStatefulSetForTidbCluster(tc *v1alpha1.Tid
 	}
 
 	return updateStatefulSet(tmm.setControl, tc, newTiDBSet, oldTiDBSet)
+}
+
+func (tmm *tidbMemberManager) shouldRecover(tc *v1alpha1.TidbCluster) bool {
+	if tc.Status.TiDB.FailureMembers == nil {
+		return false
+	}
+	// If all desired replicas (excluding failover pods) of tidb cluster are
+	// healthy, we can perform our failover recovery operation.
+	// Note that failover pods may fail (e.g. lack of resources) and we don't care
+	// about them because we're going to delete them.
+	for ordinal := range tc.TiDBStsDesiredOrdinals(true) {
+		name := fmt.Sprintf("%s-%d", controller.TiDBMemberName(tc.GetName()), ordinal)
+		pod, err := tmm.podLister.Pods(tc.Namespace).Get(name)
+		if err != nil {
+			klog.Errorf("pod %s/%s does not exist: %v", tc.Namespace, name, err)
+			return false
+		}
+		if !podutil.IsPodReady(pod) {
+			return false
+		}
+		status, ok := tc.Status.TiDB.Members[pod.Name]
+		if !ok || !status.Health {
+			return false
+		}
+	}
+	return true
 }
 
 func (tmm *tidbMemberManager) syncTiDBService(tc *v1alpha1.TidbCluster) error {
@@ -249,6 +304,7 @@ func (tmm *tidbMemberManager) syncTiDBService(tc *v1alpha1.TidbCluster) error {
 		return err
 	}
 	oldSvc := oldSvcTmp.DeepCopy()
+	util.RetainManagedFields(newSvc, oldSvc)
 
 	equal, err := controller.ServiceEqual(newSvc, oldSvc)
 	if err != nil {
@@ -260,11 +316,11 @@ func (tmm *tidbMemberManager) syncTiDBService(tc *v1alpha1.TidbCluster) error {
 	if !equal || !annoEqual || isOrphan {
 		svc := *oldSvc
 		svc.Spec = newSvc.Spec
-		svc.Spec.ClusterIP = oldSvc.Spec.ClusterIP
 		err = controller.SetServiceLastAppliedConfigAnnotation(&svc)
 		if err != nil {
 			return err
 		}
+		svc.Spec.ClusterIP = oldSvc.Spec.ClusterIP
 		// apply change of annotations if any
 		for k, v := range newSvc.Annotations {
 			svc.Annotations[k] = v
@@ -408,7 +464,7 @@ func getNewTiDBServiceOrNil(tc *v1alpha1.TidbCluster) *corev1.Service {
 			Name:            svcName,
 			Namespace:       ns,
 			Labels:          tidbLabels,
-			Annotations:     svcSpec.Annotations,
+			Annotations:     copyAnnotations(svcSpec.Annotations),
 			OwnerReferences: []metav1.OwnerReference{controller.GetOwnerRef(tc)},
 		},
 		Spec: corev1.ServiceSpec{
@@ -711,7 +767,8 @@ func (tmm *tidbMemberManager) syncTidbClusterStatus(tc *v1alpha1.TidbCluster, se
 	if err != nil {
 		return err
 	}
-	if upgrading && tc.Status.TiKV.Phase != v1alpha1.UpgradePhase && tc.Status.PD.Phase != v1alpha1.UpgradePhase {
+	if upgrading && tc.Status.TiKV.Phase != v1alpha1.UpgradePhase &&
+		tc.Status.PD.Phase != v1alpha1.UpgradePhase && tc.Status.Pump.Phase != v1alpha1.UpgradePhase {
 		tc.Status.TiDB.Phase = v1alpha1.UpgradePhase
 	} else {
 		tc.Status.TiDB.Phase = v1alpha1.NormalPhase
@@ -738,7 +795,7 @@ func (tmm *tidbMemberManager) syncTidbClusterStatus(tc *v1alpha1.TidbCluster, se
 			}
 		}
 		pod, err := tmm.podLister.Pods(tc.GetNamespace()).Get(name)
-		if err != nil && !apierrors.IsNotFound(err) {
+		if err != nil && !errors.IsNotFound(err) {
 			return err
 		}
 		if pod != nil && pod.Spec.NodeName != "" {

@@ -18,7 +18,9 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
+	"github.com/pingcap/tidb-operator/pkg/controller"
 	"github.com/pingcap/tidb-operator/pkg/label"
 	operatorUtils "github.com/pingcap/tidb-operator/pkg/util"
 	appsv1 "k8s.io/api/apps/v1"
@@ -57,11 +59,81 @@ func checkStsAutoScalingPrerequisites(set *appsv1.StatefulSet) bool {
 	return true
 }
 
-// checkStsAutoScalingInterval would check whether there is enough interval duration between every two auto-scaling
-func checkStsAutoScalingInterval(tac *v1alpha1.TidbClusterAutoScaler, intervalSeconds int32, memberType v1alpha1.MemberType) (bool, error) {
+func checkStsAutoScaling(tac *v1alpha1.TidbClusterAutoScaler, thresholdSeconds, intervalSeconds int32, memberType v1alpha1.MemberType) (bool, error) {
+	realClock := clockwork.NewRealClock()
 	if tac.Annotations == nil {
 		tac.Annotations = map[string]string{}
 	}
+	// 3*controller.ResyncDuration is maximum time allowed before reset phase status
+	ableToScale, err := checkLastSyncingTimestamp(tac, 3*controller.ResyncDuration, realClock)
+	if err != nil {
+		return false, err
+	}
+	if !ableToScale {
+		return false, nil
+	}
+	ableToScale, err = checkStsReadyAutoScalingTimestamp(tac, thresholdSeconds, realClock)
+	if err != nil {
+		return false, err
+	}
+	if !ableToScale {
+		return false, nil
+	}
+	ableToScale, err = checkStsAutoScalingInterval(tac, intervalSeconds, memberType)
+	if err != nil {
+		return false, err
+	}
+	if !ableToScale {
+		return false, nil
+	}
+	return true, nil
+}
+
+// checkLastSyncingTimestamp reset TiKV phase if last auto scaling timestamp is longer than thresholdSec
+func checkLastSyncingTimestamp(tac *v1alpha1.TidbClusterAutoScaler, thresholdSec time.Duration, clock clockwork.Clock) (bool, error) {
+	if tac.Annotations == nil {
+		tac.Annotations = map[string]string{}
+	}
+
+	lastAutoScalingTimestamp, existed := tac.Annotations[label.AnnLastSyncingTimestamp]
+	if !existed {
+		// NOTE: because record autoscaler sync timestamp happens after check auto scale,
+		// label will not exist during first sync, return allow auto scale in this case.
+		return true, nil
+	}
+	t, err := strconv.ParseInt(lastAutoScalingTimestamp, 10, 64)
+	if err != nil {
+		return false, err
+	}
+	// if there's no resync within thresholdSec, reset TiKV phase to Normal
+	if clock.Now().After(time.Unix(t, 0).Add(thresholdSec)) {
+		tac.Status.TiKV.Phase = v1alpha1.NormalAutoScalerPhase
+		return false, nil
+	}
+	return true, nil
+}
+
+// checkStsReadyAutoScalingTimestamp would check whether there is enough time window after ready to scale
+func checkStsReadyAutoScalingTimestamp(tac *v1alpha1.TidbClusterAutoScaler, thresholdSeconds int32, clock clockwork.Clock) (bool, error) {
+	readyAutoScalingTimestamp, existed := tac.Annotations[label.AnnTiKVReadyToScaleTimestamp]
+
+	if !existed {
+		tac.Annotations[label.AnnTiKVReadyToScaleTimestamp] = fmt.Sprintf("%d", clock.Now().Unix())
+		return false, nil
+	}
+	t, err := strconv.ParseInt(readyAutoScalingTimestamp, 10, 32)
+	if err != nil {
+		return false, err
+	}
+	readyAutoScalingSec := int32(clock.Now().Sub(time.Unix(t, 0)).Seconds())
+	if thresholdSeconds > readyAutoScalingSec {
+		return false, nil
+	}
+	return true, nil
+}
+
+// checkStsAutoScalingInterval would check whether there is enough interval duration between every two auto-scaling
+func checkStsAutoScalingInterval(tac *v1alpha1.TidbClusterAutoScaler, intervalSeconds int32, memberType v1alpha1.MemberType) (bool, error) {
 	lastAutoScalingTimestamp, existed := tac.Annotations[label.AnnTiDBLastAutoScalingTimestamp]
 	if memberType == v1alpha1.TiKVMemberType {
 		lastAutoScalingTimestamp, existed = tac.Annotations[label.AnnTiKVLastAutoScalingTimestamp]
@@ -132,23 +204,23 @@ func defaultTAC(tac *v1alpha1.TidbClusterAutoScaler) {
 		if tac.Spec.TiKV.MinReplicas == nil {
 			tac.Spec.TiKV.MinReplicas = pointer.Int32Ptr(1)
 		}
-		if len(tac.Spec.TiKV.Metrics) == 0 {
-			tac.Spec.TiKV.Metrics = append(tac.Spec.TiKV.Metrics, defaultMetricSpec)
-		}
-		if tac.Spec.TiKV.ScaleInThreshold == nil {
-			tac.Spec.TiKV.ScaleInThreshold = pointer.Int32Ptr(5)
-		}
-		if tac.Spec.TiKV.ScaleOutThreshold == nil {
-			tac.Spec.TiKV.ScaleOutThreshold = pointer.Int32Ptr(3)
-		}
-		if tac.Spec.TiKV.MetricsTimeDuration == nil {
-			tac.Spec.TiKV.MetricsTimeDuration = pointer.StringPtr("3m")
-		}
 		if tac.Spec.TiKV.ScaleOutIntervalSeconds == nil {
 			tac.Spec.TiKV.ScaleOutIntervalSeconds = pointer.Int32Ptr(300)
 		}
 		if tac.Spec.TiKV.ScaleInIntervalSeconds == nil {
 			tac.Spec.TiKV.ScaleInIntervalSeconds = pointer.Int32Ptr(500)
+		}
+		// If ExternalEndpoint is not provided, we would set default metrics
+		if tac.Spec.TiKV.ExternalEndpoint == nil {
+			if len(tac.Spec.TiKV.Metrics) == 0 {
+				tac.Spec.TiKV.Metrics = append(tac.Spec.TiKV.Metrics, defaultMetricSpec)
+			}
+			if tac.Spec.TiKV.MetricsTimeDuration == nil {
+				tac.Spec.TiKV.MetricsTimeDuration = pointer.StringPtr("3m")
+			}
+		}
+		if tac.Spec.TiKV.ReadyToScaleThresholdSeconds == nil {
+			tac.Spec.TiKV.ReadyToScaleThresholdSeconds = pointer.Int32Ptr(30)
 		}
 	}
 
@@ -156,23 +228,19 @@ func defaultTAC(tac *v1alpha1.TidbClusterAutoScaler) {
 		if tac.Spec.TiDB.MinReplicas == nil {
 			tac.Spec.TiDB.MinReplicas = pointer.Int32Ptr(1)
 		}
-		if len(tac.Spec.TiDB.Metrics) == 0 {
-			tac.Spec.TiDB.Metrics = append(tac.Spec.TiDB.Metrics, defaultMetricSpec)
-		}
-		if tac.Spec.TiDB.ScaleInThreshold == nil {
-			tac.Spec.TiDB.ScaleInThreshold = pointer.Int32Ptr(5)
-		}
-		if tac.Spec.TiDB.ScaleOutThreshold == nil {
-			tac.Spec.TiDB.ScaleOutThreshold = pointer.Int32Ptr(3)
-		}
-		if tac.Spec.TiDB.MetricsTimeDuration == nil {
-			tac.Spec.TiDB.MetricsTimeDuration = pointer.StringPtr("3m")
-		}
 		if tac.Spec.TiDB.ScaleOutIntervalSeconds == nil {
 			tac.Spec.TiDB.ScaleOutIntervalSeconds = pointer.Int32Ptr(300)
 		}
 		if tac.Spec.TiDB.ScaleInIntervalSeconds == nil {
 			tac.Spec.TiDB.ScaleInIntervalSeconds = pointer.Int32Ptr(500)
+		}
+		if tac.Spec.TiDB.ExternalEndpoint == nil {
+			if len(tac.Spec.TiDB.Metrics) == 0 {
+				tac.Spec.TiDB.Metrics = append(tac.Spec.TiDB.Metrics, defaultMetricSpec)
+			}
+			if tac.Spec.TiDB.MetricsTimeDuration == nil {
+				tac.Spec.TiDB.MetricsTimeDuration = pointer.StringPtr("3m")
+			}
 		}
 	}
 

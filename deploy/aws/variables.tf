@@ -14,7 +14,7 @@ variable "eks_name" {
 
 variable "eks_version" {
   description = "Kubernetes version to use for the EKS cluster."
-  default     = "1.12"
+  default     = "1.15"
 }
 
 variable "operator_version" {
@@ -80,7 +80,7 @@ variable "bastion_instance_type" {
 
 # For aws tutorials compatiablity
 variable "default_cluster_version" {
-  default = "v3.0.8"
+  default = "v3.0.13"
 }
 
 variable "default_cluster_pd_count" {
@@ -118,4 +118,30 @@ variable "default_cluster_name" {
 variable "create_tidb_cluster_release" {
   description = "whether creating tidb-cluster helm release"
   default     = false
+}
+
+variable "create_tiflash_node_pool" {
+  description = "whether creating node pool for tiflash"
+  default     = false
+}
+
+variable "create_cdc_node_pool" {
+  description = "whether creating node pool for cdc"
+  default     = false
+}
+
+variable "cluster_tiflash_count" {
+  default = 2
+}
+
+variable "cluster_cdc_count" {
+  default = 3
+}
+
+variable "cluster_cdc_instance_type" {
+  default = "c5.2xlarge"
+}
+
+variable "cluster_tiflash_instance_type" {
+  default = "i3.4xlarge"
 }

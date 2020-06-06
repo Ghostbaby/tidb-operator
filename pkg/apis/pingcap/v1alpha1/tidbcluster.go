@@ -14,10 +14,14 @@
 package v1alpha1
 
 import (
+	"encoding/json"
 	"fmt"
+	"strings"
 
+	"github.com/pingcap/advanced-statefulset/client/apis/apps/v1/helper"
 	"github.com/pingcap/tidb-operator/pkg/label"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 )
 
 const (
@@ -52,6 +56,16 @@ func (tc *TidbCluster) PDImage() string {
 	return image
 }
 
+func (tc *TidbCluster) PDVersion() string {
+	image := tc.PDImage()
+	colonIdx := strings.LastIndexByte(image, ':')
+	if colonIdx >= 0 {
+		return image[colonIdx+1:]
+	}
+
+	return "latest"
+}
+
 func (tc *TidbCluster) TiKVImage() string {
 	image := tc.Spec.TiKV.Image
 	baseImage := tc.Spec.TiKV.BaseImage
@@ -80,6 +94,20 @@ func (tc *TidbCluster) TiFlashImage() string {
 	// base image takes higher priority
 	if baseImage != "" {
 		version := tc.Spec.TiFlash.Version
+		if version == nil {
+			version = &tc.Spec.Version
+		}
+		image = fmt.Sprintf("%s:%s", baseImage, *version)
+	}
+	return image
+}
+
+func (tc *TidbCluster) TiCDCImage() string {
+	image := tc.Spec.TiCDC.Image
+	baseImage := tc.Spec.TiCDC.BaseImage
+	// base image takes higher priority
+	if baseImage != "" {
+		version := tc.Spec.TiCDC.Version
 		if version == nil {
 			version = &tc.Spec.Version
 		}
@@ -174,6 +202,41 @@ func (tc *TidbCluster) TiDBUpgrading() bool {
 	return tc.Status.TiDB.Phase == UpgradePhase
 }
 
+func (tc *TidbCluster) TiFlashUpgrading() bool {
+	return tc.Status.TiFlash.Phase == UpgradePhase
+}
+
+func (tc *TidbCluster) getDeleteSlots(component string) (deleteSlots sets.Int32) {
+	deleteSlots = sets.NewInt32()
+	annotations := tc.GetAnnotations()
+	if annotations == nil {
+		return deleteSlots
+	}
+	var key string
+	if component == label.PDLabelVal {
+		key = label.AnnPDDeleteSlots
+	} else if component == label.TiDBLabelVal {
+		key = label.AnnTiDBDeleteSlots
+	} else if component == label.TiKVLabelVal {
+		key = label.AnnTiKVDeleteSlots
+	} else if component == label.TiFlashLabelVal {
+		key = label.AnnTiFlashDeleteSlots
+	} else {
+		return
+	}
+	value, ok := annotations[key]
+	if !ok {
+		return
+	}
+	var slice []int32
+	err := json.Unmarshal([]byte(value), &slice)
+	if err != nil {
+		return
+	}
+	deleteSlots.Insert(slice...)
+	return
+}
+
 func (tc *TidbCluster) PDAllPodsStarted() bool {
 	return tc.PDStsDesiredReplicas() == tc.PDStsActualReplicas()
 }
@@ -216,6 +279,14 @@ func (tc *TidbCluster) PDStsActualReplicas() int32 {
 	return stsStatus.Replicas
 }
 
+func (tc *TidbCluster) PDStsDesiredOrdinals(excludeFailover bool) sets.Int32 {
+	replicas := tc.Spec.PD.Replicas
+	if !excludeFailover {
+		replicas = tc.PDStsDesiredReplicas()
+	}
+	return helper.GetPodOrdinalsFromReplicasAndDeleteSlots(replicas, tc.getDeleteSlots(label.PDLabelVal))
+}
+
 func (tc *TidbCluster) TiKVAllPodsStarted() bool {
 	return tc.TiKVStsDesiredReplicas() == tc.TiKVStsActualReplicas()
 }
@@ -246,6 +317,14 @@ func (tc *TidbCluster) TiKVStsActualReplicas() int32 {
 	return stsStatus.Replicas
 }
 
+func (tc *TidbCluster) TiKVStsDesiredOrdinals(excludeFailover bool) sets.Int32 {
+	replicas := tc.Spec.TiKV.Replicas
+	if !excludeFailover {
+		replicas = tc.TiKVStsDesiredReplicas()
+	}
+	return helper.GetPodOrdinalsFromReplicasAndDeleteSlots(replicas, tc.getDeleteSlots(label.TiKVLabelVal))
+}
+
 func (tc *TidbCluster) TiFlashAllPodsStarted() bool {
 	return tc.TiFlashStsDesiredReplicas() == tc.TiFlashStsActualReplicas()
 }
@@ -265,7 +344,18 @@ func (tc *TidbCluster) TiFlashAllStoresReady() bool {
 }
 
 func (tc *TidbCluster) TiFlashStsDesiredReplicas() int32 {
+	if tc.Spec.TiFlash == nil {
+		return 0
+	}
 	return tc.Spec.TiFlash.Replicas + int32(len(tc.Status.TiFlash.FailureStores))
+}
+
+func (tc *TidbCluster) TiCDCDeployDesiredReplicas() int32 {
+	if tc.Spec.TiCDC == nil {
+		return 0
+	}
+
+	return tc.Spec.TiCDC.Replicas
 }
 
 func (tc *TidbCluster) TiFlashStsActualReplicas() int32 {
@@ -274,6 +364,17 @@ func (tc *TidbCluster) TiFlashStsActualReplicas() int32 {
 		return 0
 	}
 	return stsStatus.Replicas
+}
+
+func (tc *TidbCluster) TiFlashStsDesiredOrdinals(excludeFailover bool) sets.Int32 {
+	if tc.Spec.TiFlash == nil {
+		return sets.Int32{}
+	}
+	replicas := tc.Spec.TiFlash.Replicas
+	if !excludeFailover {
+		replicas = tc.TiFlashStsDesiredReplicas()
+	}
+	return helper.GetPodOrdinalsFromReplicasAndDeleteSlots(replicas, tc.getDeleteSlots(label.TiFlashLabelVal))
 }
 
 func (tc *TidbCluster) TiDBAllPodsStarted() bool {
@@ -304,6 +405,14 @@ func (tc *TidbCluster) TiDBStsActualReplicas() int32 {
 		return 0
 	}
 	return stsStatus.Replicas
+}
+
+func (tc *TidbCluster) TiDBStsDesiredOrdinals(excludeFailover bool) sets.Int32 {
+	replicas := tc.Spec.TiDB.Replicas
+	if !excludeFailover {
+		replicas = tc.TiDBStsDesiredReplicas()
+	}
+	return helper.GetPodOrdinalsFromReplicasAndDeleteSlots(replicas, tc.getDeleteSlots(label.TiDBLabelVal))
 }
 
 func (tc *TidbCluster) PDIsAvailable() bool {
@@ -348,6 +457,15 @@ func (tc *TidbCluster) TiKVIsAvailable() bool {
 	}
 
 	if tc.Status.TiKV.StatefulSet == nil || tc.Status.TiKV.StatefulSet.ReadyReplicas < lowerLimit {
+		return false
+	}
+
+	return true
+}
+
+func (tc *TidbCluster) PumpIsAvailable() bool {
+	var lowerLimit int32 = 1
+	if tc.Status.Pump.StatefulSet == nil || tc.Status.Pump.StatefulSet.ReadyReplicas < lowerLimit {
 		return false
 	}
 
@@ -435,4 +553,36 @@ func (tc *TidbCluster) GetInstanceName() string {
 func (tc *TidbCluster) SkipTLSWhenConnectTiDB() bool {
 	_, ok := tc.Annotations[label.AnnSkipTLSWhenConnectTiDB]
 	return ok
+}
+
+func (tc *TidbCluster) TiCDCTimezone() string {
+	if tc.Spec.TiCDC != nil && tc.Spec.TiCDC.Config != nil && tc.Spec.TiCDC.Config.Timezone != nil {
+		return *tc.Spec.TiCDC.Config.Timezone
+	}
+
+	return tc.Timezone()
+}
+
+func (tc *TidbCluster) TiCDCGCTTL() int32 {
+	if tc.Spec.TiCDC != nil && tc.Spec.TiCDC.Config != nil && tc.Spec.TiCDC.Config.GCTTL != nil {
+		return *tc.Spec.TiCDC.Config.GCTTL
+	}
+
+	return 86400
+}
+
+func (tc *TidbCluster) TiCDCLogFile() string {
+	if tc.Spec.TiCDC != nil && tc.Spec.TiCDC.Config != nil && tc.Spec.TiCDC.Config.LogFile != nil {
+		return *tc.Spec.TiCDC.Config.LogFile
+	}
+
+	return "/dev/stderr"
+}
+
+func (tc *TidbCluster) TiCDCLogLevel() string {
+	if tc.Spec.TiCDC != nil && tc.Spec.TiCDC.Config != nil && tc.Spec.TiCDC.Config.LogLevel != nil {
+		return *tc.Spec.TiCDC.Config.LogLevel
+	}
+
+	return "info"
 }

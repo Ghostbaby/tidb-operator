@@ -19,7 +19,7 @@ variable "cluster_name" {
 
 variable "cluster_version" {
   type    = string
-  default = "v3.0.8"
+  default = "v3.0.13"
 }
 
 variable "ssh_key_name" {
@@ -161,4 +161,30 @@ variable "group_kubelet_extra_args" {
   description = "If provided, override the kubelet_extra_args for a specific node group which matches the key of map (e.g. tidb, tikv, pd, monitor)"
   type        = map(string)
   default     = {}
+}
+
+variable "create_tiflash_node_pool" {
+  description = "whether creating node pool for tiflash"
+  default     = false
+}
+
+variable "create_cdc_node_pool" {
+  description = "whether creating node pool for cdc"
+  default     = false
+}
+
+variable "tiflash_count" {
+  default = 2
+}
+
+variable "cdc_count" {
+  default = 3
+}
+
+variable "cdc_instance_type" {
+  default = "c5.2xlarge"
+}
+
+variable "tiflash_instance_type" {
+  default = "i3.4xlarge"
 }

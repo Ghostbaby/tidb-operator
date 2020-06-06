@@ -25,6 +25,7 @@ ROOT=$(unset CDPATH && cd $(dirname "${BASH_SOURCE[0]}")/.. && pwd)
 cd $ROOT
 
 PULL_SECRET_FILE=${PULL_SECRET_FILE:-}
+DOCKER_VERSION=${DOCKER_VERSION:-19.03.9}
 
 if [ ! -e "$PULL_SECRET_FILE" ]; then
     echo "error: pull secret file '$PULL_SECRET_FILE' does not exist"
@@ -44,7 +45,10 @@ sudo yum install -y jq git make golang
 sudo yum install -y yum-utils
 sudo yum-config-manager \
     --add-repo https://download.docker.com/linux/centos/docker-ce.repo
-sudo yum install -y --nobest docker-ce docker-ce-cli containerd.io
+# install required containerd.io manually, see https://linuxconfig.org/how-to-install-docker-in-rhel-8
+sudo yum install -y https://download.docker.com/linux/centos/7/x86_64/stable/Packages/containerd.io-1.2.6-3.3.el7.x86_64.rpm
+# pin the same version for daemon and cli: https://github.com/docker/cli/issues/2533
+sudo yum install -y docker-ce-${DOCKER_VERSION} docker-ce-cli-${DOCKER_VERSION}
 if ! systemctl is-active --quiet docker; then
     sudo systemctl start docker
 fi
@@ -66,18 +70,19 @@ echo "info: downloading latest crc"
 cd $HOME
 CRC_VERSION=$(curl --retry 10 -L -s 'https://mirror.openshift.com/pub/openshift-v4/clients/crc/latest/release-info.json' | jq -r '.version.crcVersion')
 if ! test -e crc-linux-amd64.tar.xz; then
-    curl --retryn 10 -LO https://mirror.openshift.com/pub/openshift-v4/clients/crc/$CRC_VERSION/crc-linux-amd64.tar.xz
+    curl --retry 10 -LO https://mirror.openshift.com/pub/openshift-v4/clients/crc/$CRC_VERSION/crc-linux-amd64.tar.xz
     tar -xvf crc-linux-amd64.tar.xz
 fi
 export PATH=$HOME/crc-linux-$CRC_VERSION-amd64:$PATH
 
 crc version
 
-echo "info: starting the OpenShift clsuter"
-crcStatus=$(crc status | awk '/CRC VM:/ {print $3}')
+crcStatus=$(crc status 2>/dev/null | awk '/CRC VM:/ {print $3}') || true
 if [[ "$crcStatus" == "Running" ]]; then
+    echo "info: OpenShift cluster is running"
     crc status
 else
+    echo "info: starting OpenShift clsuter"
     crc setup
     crc config set cpus 6
     crc config set memory 24576

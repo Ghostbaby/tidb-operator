@@ -46,6 +46,8 @@ GINKGO_PARALLEL=${GINKGO_PARALLEL:-n} # set to 'y' to run tests in parallel
 GINKGO_NO_COLOR=${GINKGO_NO_COLOR:-n}
 GINKGO_STREAM=${GINKGO_STREAM:-y}
 SKIP_GINKGO=${SKIP_GINKGO:-}
+# We don't delete namespace on failure by default for easier debugging in local development.
+DELETE_NAMESPACE_ON_FAILURE=${DELETE_NAMESPACE_ON_FAILURE:-false}
 
 if [ -z "$KUBECONFIG" ]; then
     echo "error: KUBECONFIG is required"
@@ -64,6 +66,7 @@ echo "GINKGO_NODES: $GINKGO_NODES"
 echo "GINKGO_PARALLEL: $GINKGO_PARALLEL"
 echo "GINKGO_NO_COLOR: $GINKGO_NO_COLOR"
 echo "GINKGO_STREAM: $GINKGO_STREAM"
+echo "DELETE_NAMESPACE_ON_FAILURE: $DELETE_NAMESPACE_ON_FAILURE"
 
 function e2e::__wait_for_ds() {
     local ns="$1"
@@ -178,7 +181,7 @@ function e2e::setup_helm_server() {
         echo "info: wait for tiller to be ready"
         e2e::__wait_for_deploy kube-system tiller-deploy
     else
-        $HELM_BIN init --service-account=tiller --wait
+        $HELM_BIN init --service-account=tiller --skip-refresh --wait
     fi
     $HELM_BIN version
 }
@@ -196,6 +199,13 @@ function e2e::image_load() {
         $TIDB_BACKUP_MANAGER_IMAGE
         $E2E_IMAGE
     )
+    echo "info: pull if images do not exist"
+    for image in ${images[@]}; do
+        if ! docker inspect -f '{{.Id}}' $image &>/dev/null; then
+            echo "info: pulling $image"
+            docker pull $image
+        fi
+    done
     if [ "$PROVIDER" == "kind" ]; then
         local nodes=$($KIND_BIN get nodes --name $CLUSTER | grep -v 'control-plane$')
         echo "info: load images ${images[@]}"
@@ -316,15 +326,13 @@ e2e_args=(
     /usr/local/bin/e2e.test
     --
     --clean-start=true
-    --delete-namespace-on-failure=false
-    --repo-root="$ROOT"
+    --delete-namespace-on-failure="${DELETE_NAMESPACE_ON_FAILURE}"
+    --repo-root="${ROOT}"
     # tidb-operator e2e flags
     --operator-tag=e2e
     --operator-image="${TIDB_OPERATOR_IMAGE}"
     --backup-image="${TIDB_BACKUP_MANAGER_IMAGE}"
     --e2e-image="${E2E_IMAGE}"
-    # two tidb versions can be configuraed: <defaultVersion>,<upgradeToVersion>
-    --tidb-versions=v3.0.7,v3.0.8
     --chart-dir=/charts
     -v=4
 )
@@ -362,6 +370,7 @@ elif [ "$PROVIDER" == "gke" ]; then
         --gce-project="${GCP_PROJECT}"
         --gce-region="${GCP_REGION}"
         --gce-zone="${GCP_ZONE}"
+        --gke-cluster="${CLUSTER}"
     )
     docker_args+=(
         -v ${GCP_CREDENTIALS}:${GCP_CREDENTIALS}
@@ -374,6 +383,8 @@ elif [ "$PROVIDER" == "gke" ]; then
         exit 1
     fi
     docker_args+=(
+        # gcloud config
+        -v $HOME/.config/gcloud:/root/.config/gcloud
         -v ${GCP_SDK}:/google-cloud-sdk
         # ~/.ssh/google_compute_engine must be mounted into e2e container to run ssh
         -v $HOME/.ssh/google_compute_engine:/root/.ssh/google_compute_engine

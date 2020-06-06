@@ -16,7 +16,6 @@ package pdapi
 import (
 	"bytes"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -25,17 +24,15 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pingcap/tidb-operator/pkg/util"
-
-	v1 "k8s.io/api/core/v1"
-	"k8s.io/klog"
-
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/pingcap/pd/pkg/typeutil"
 	"github.com/pingcap/tidb-operator/pkg/httputil"
+	"github.com/pingcap/tidb-operator/pkg/util"
+	"github.com/pingcap/tidb-operator/pkg/util/crypto"
 	types "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/klog"
 )
 
 const (
@@ -49,18 +46,22 @@ type Namespace string
 type PDControlInterface interface {
 	// GetPDClient provides PDClient of the tidb cluster.
 	GetPDClient(Namespace, string, bool) PDClient
+	// GetPDEtcdClient provides PD etcd Client of the tidb cluster.
+	GetPDEtcdClient(namespace Namespace, tcName string, tlsEnabled bool) (PDEtcdClient, error)
 }
 
 // defaultPDControl is the default implementation of PDControlInterface.
 type defaultPDControl struct {
-	mutex     sync.Mutex
-	kubeCli   kubernetes.Interface
-	pdClients map[string]PDClient
+	mutex         sync.Mutex
+	etcdmutex     sync.Mutex
+	kubeCli       kubernetes.Interface
+	pdClients     map[string]PDClient
+	pdEtcdClients map[string]PDEtcdClient
 }
 
 // NewDefaultPDControl returns a defaultPDControl instance
 func NewDefaultPDControl(kubeCli kubernetes.Interface) PDControlInterface {
-	return &defaultPDControl{kubeCli: kubeCli, pdClients: map[string]PDClient{}}
+	return &defaultPDControl{kubeCli: kubeCli, pdClients: map[string]PDClient{}, pdEtcdClients: map[string]PDEtcdClient{}}
 }
 
 // GetTLSConfig returns *tls.Config for given TiDB cluster.
@@ -72,30 +73,33 @@ func GetTLSConfig(kubeCli kubernetes.Interface, namespace Namespace, tcName stri
 		return nil, fmt.Errorf("unable to load certificates from secret %s/%s: %v", namespace, secretName, err)
 	}
 
-	rootCAs := x509.NewCertPool()
-	var tlsCert tls.Certificate
+	return crypto.LoadTlsConfigFromSecret(secret, caCert)
+}
 
-	if len(caCert) > 0 {
-		rootCAs.AppendCertsFromPEM(caCert)
-	} else {
-		rootCAs.AppendCertsFromPEM(secret.Data[v1.ServiceAccountRootCAKey])
+func (pdc *defaultPDControl) GetPDEtcdClient(namespace Namespace, tcName string, tlsEnabled bool) (PDEtcdClient, error) {
+	pdc.etcdmutex.Lock()
+	defer pdc.etcdmutex.Unlock()
+
+	var tlsConfig *tls.Config
+	var err error
+
+	if tlsEnabled {
+		tlsConfig, err = GetTLSConfig(pdc.kubeCli, namespace, tcName, nil)
+		if err != nil {
+			klog.Errorf("Unable to get tls config for tidb cluster %q, pd etcd client may not work: %v", tcName, err)
+			return nil, err
+		}
+		return NewPdEtcdClient(PDEtcdClientURL(namespace, tcName), DefaultTimeout, tlsConfig)
 	}
-
-	clientCert, certExists := secret.Data[v1.TLSCertKey]
-	clientKey, keyExists := secret.Data[v1.TLSPrivateKeyKey]
-	if !certExists || !keyExists {
-		return nil, fmt.Errorf("cert or key does not exist in secret %s/%s", namespace, secretName)
+	key := pdEtcdClientKey(namespace, tcName)
+	if _, ok := pdc.pdEtcdClients[key]; !ok {
+		pdetcdClient, err := NewPdEtcdClient(PDEtcdClientURL(namespace, tcName), DefaultTimeout, nil)
+		if err != nil {
+			return nil, err
+		}
+		pdc.pdEtcdClients[key] = pdetcdClient
 	}
-
-	tlsCert, err = tls.X509KeyPair(clientCert, clientKey)
-	if err != nil {
-		return nil, fmt.Errorf("unable to load certificates from secret %s/%s: %v", namespace, secretName, err)
-	}
-
-	return &tls.Config{
-		RootCAs:      rootCAs,
-		Certificates: []tls.Certificate{tlsCert},
-	}, nil
+	return pdc.pdEtcdClients[key], nil
 }
 
 // GetPDClient provides a PDClient of real pd cluster,if the PDClient not existing, it will create new one.
@@ -105,21 +109,22 @@ func (pdc *defaultPDControl) GetPDClient(namespace Namespace, tcName string, tls
 
 	var tlsConfig *tls.Config
 	var err error
-	scheme := "http"
+	var scheme = "http"
+
 	if tlsEnabled {
 		scheme = "https"
+		tlsConfig, err = GetTLSConfig(pdc.kubeCli, namespace, tcName, nil)
+		if err != nil {
+			klog.Errorf("Unable to get tls config for tidb cluster %q, pd client may not work: %v", tcName, err)
+			return &pdClient{url: PdClientURL(namespace, tcName, scheme), httpClient: &http.Client{Timeout: DefaultTimeout}}
+		}
+
+		return NewPDClient(PdClientURL(namespace, tcName, scheme), DefaultTimeout, tlsConfig)
 	}
 
 	key := pdClientKey(scheme, namespace, tcName)
 	if _, ok := pdc.pdClients[key]; !ok {
-		if tlsEnabled {
-			tlsConfig, err = GetTLSConfig(pdc.kubeCli, namespace, tcName, nil)
-			if err != nil {
-				klog.Errorf("Unable to get tls config for tidb cluster %q, pd client may not work: %v", tcName, err)
-				return &pdClient{url: PdClientURL(namespace, tcName, scheme), httpClient: &http.Client{Timeout: DefaultTimeout}}
-			}
-		}
-		pdc.pdClients[key] = NewPDClient(PdClientURL(namespace, tcName, scheme), DefaultTimeout, tlsConfig)
+		pdc.pdClients[key] = NewPDClient(PdClientURL(namespace, tcName, scheme), DefaultTimeout, nil)
 	}
 	return pdc.pdClients[key]
 }
@@ -129,9 +134,17 @@ func pdClientKey(scheme string, namespace Namespace, clusterName string) string 
 	return fmt.Sprintf("%s.%s.%s", scheme, clusterName, string(namespace))
 }
 
+func pdEtcdClientKey(namespace Namespace, clusterName string) string {
+	return fmt.Sprintf("%s.%s", clusterName, string(namespace))
+}
+
 // pdClientUrl builds the url of pd client
 func PdClientURL(namespace Namespace, clusterName string, scheme string) string {
 	return fmt.Sprintf("%s://%s-pd.%s:2379", scheme, clusterName, string(namespace))
+}
+
+func PDEtcdClientURL(namespace Namespace, clusterName string) string {
+	return fmt.Sprintf("%s-pd.%s:2379", clusterName, string(namespace))
 }
 
 // PDClient provides pd server's api
@@ -153,6 +166,8 @@ type PDClient interface {
 	// storeLabelsEqualNodeLabels compares store labels with node labels
 	// for historic reasons, PD stores TiKV labels as []*StoreLabel which is a key-value pair slice
 	SetStoreLabels(storeID uint64, labels map[string]string) (bool, error)
+	// UpdateReplicationConfig updates the replication config
+	UpdateReplicationConfig(config PDReplicationConfig) error
 	// DeleteStore deletes a TiKV store from cluster
 	DeleteStore(storeID uint64) error
 	// SetStoreState sets store to specified state.
@@ -184,6 +199,7 @@ var (
 	schedulersPrefix       = "pd/api/v1/schedulers"
 	pdLeaderPrefix         = "pd/api/v1/leader"
 	pdLeaderTransferPrefix = "pd/api/v1/leader/transfer"
+	pdReplicationPrefix    = "pd/api/v1/config/replicate"
 )
 
 // pdClient is default implementation of PDClient
@@ -511,6 +527,24 @@ func (pc *pdClient) SetStoreLabels(storeID uint64, labels map[string]string) (bo
 	return false, fmt.Errorf("failed %v to set store labels: %v", res.StatusCode, err2)
 }
 
+func (pc *pdClient) UpdateReplicationConfig(config PDReplicationConfig) error {
+	apiURL := fmt.Sprintf("%s/%s", pc.url, pdReplicationPrefix)
+	data, err := json.Marshal(config)
+	if err != nil {
+		return err
+	}
+	res, err := pc.httpClient.Post(apiURL, "application/json", bytes.NewBuffer(data))
+	if err != nil {
+		return err
+	}
+	defer httputil.DeferClose(res.Body)
+	if res.StatusCode == http.StatusOK {
+		return nil
+	}
+	err = httputil.ReadErrorBody(res.Body)
+	return fmt.Errorf("failed %v to update replication: %v", res.StatusCode, err)
+}
+
 func (pc *pdClient) BeginEvictLeader(storeID uint64) error {
 	leaderEvictInfo := getLeaderEvictSchedulerInfo(storeID)
 	apiURL := fmt.Sprintf("%s/%s", pc.url, schedulersPrefix)
@@ -696,6 +730,7 @@ const (
 	DeleteMemberByIDActionType         ActionType = "DeleteMemberByID"
 	DeleteMemberActionType             ActionType = "DeleteMember "
 	SetStoreLabelsActionType           ActionType = "SetStoreLabels"
+	UpdateReplicationActionType        ActionType = "UpdateReplicationConfig"
 	BeginEvictLeaderActionType         ActionType = "BeginEvictLeader"
 	EndEvictLeaderActionType           ActionType = "EndEvictLeader"
 	GetEvictLeaderSchedulersActionType ActionType = "GetEvictLeaderSchedulers"
@@ -712,9 +747,10 @@ func (nfr *NotFoundReaction) Error() string {
 }
 
 type Action struct {
-	ID     uint64
-	Name   string
-	Labels map[string]string
+	ID          uint64
+	Name        string
+	Labels      map[string]string
+	Replication PDReplicationConfig
 }
 
 type Reaction func(action *Action) (interface{}, error)
@@ -852,6 +888,16 @@ func (pc *FakePDClient) SetStoreLabels(storeID uint64, labels map[string]string)
 		return result.(bool), err
 	}
 	return true, nil
+}
+
+// UpdateReplicationConfig updates the replication config
+func (pc *FakePDClient) UpdateReplicationConfig(config PDReplicationConfig) error {
+	if reaction, ok := pc.reactions[UpdateReplicationActionType]; ok {
+		action := &Action{Replication: config}
+		_, err := reaction(action)
+		return err
+	}
+	return nil
 }
 
 func (pc *FakePDClient) BeginEvictLeader(storeID uint64) error {

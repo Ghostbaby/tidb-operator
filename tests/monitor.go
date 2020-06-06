@@ -16,22 +16,24 @@ package tests
 import (
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
+	"net/http"
+	"net/url"
+	"time"
+
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
+	"github.com/pingcap/tidb-operator/pkg/client/clientset/versioned"
 	"github.com/pingcap/tidb-operator/pkg/label"
 	"github.com/pingcap/tidb-operator/tests/e2e/util/portforward"
 	"github.com/pingcap/tidb-operator/tests/pkg/metrics"
-	"io/ioutil"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog"
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
-	"net/http"
-	"net/url"
-	"time"
 )
 
-func CheckTidbMonitor(monitor *v1alpha1.TidbMonitor, kubeCli kubernetes.Interface, fw portforward.PortForward) error {
+func CheckTidbMonitor(monitor *v1alpha1.TidbMonitor, cli versioned.Interface, kubeCli kubernetes.Interface, fw portforward.PortForward) error {
 
 	if err := checkTidbMonitorPod(monitor, kubeCli); err != nil {
 		klog.Errorf("tm[%s/%s] failed to check pod:%v", monitor.Namespace, monitor.Name, err)
@@ -41,7 +43,24 @@ func CheckTidbMonitor(monitor *v1alpha1.TidbMonitor, kubeCli kubernetes.Interfac
 		klog.Errorf("tm[%s/%s] failed to check functional:%v", monitor.Namespace, monitor.Name, err)
 		return err
 	}
-	return nil
+	return checkTidbClusterStatus(monitor, cli)
+}
+
+func checkTidbClusterStatus(tm *v1alpha1.TidbMonitor, cli versioned.Interface) error {
+	return wait.Poll(5*time.Second, 5*time.Minute, func() (done bool, err error) {
+		tcRef := tm.Spec.Clusters[0]
+		tc, err := cli.PingcapV1alpha1().TidbClusters(tcRef.Namespace).Get(tcRef.Name, metav1.GetOptions{})
+		if err != nil {
+			return false, err
+		}
+		if tc.Status.Monitor == nil {
+			return false, nil
+		}
+		if tc.Status.Monitor.Name != tm.Name || tc.Status.Monitor.Namespace != tm.Namespace {
+			return false, fmt.Errorf("tidbcluster's monitorRef status is wrong")
+		}
+		return true, nil
+	})
 }
 
 // checkTidbMonitorPod check the pod of TidbMonitor whether it is ready
@@ -123,11 +142,13 @@ func checkPrometheusCommon(name, namespace string, fw portforward.PortForward) e
 		prometheusSvc := fmt.Sprintf("http://%s/api/v1/query?query=up", prometheusAddr)
 		resp, err := http.Get(prometheusSvc)
 		if err != nil {
+			klog.Error(err.Error())
 			return false, nil
 		}
 		defer resp.Body.Close()
 		body, err := ioutil.ReadAll(resp.Body)
 		if err != nil {
+			klog.Error(err.Error())
 			return false, nil
 		}
 		response := &struct {
@@ -135,6 +156,7 @@ func checkPrometheusCommon(name, namespace string, fw portforward.PortForward) e
 		}{}
 		err = json.Unmarshal(body, response)
 		if err != nil {
+			klog.Error(err.Error())
 			return false, nil
 		}
 		if response.Status != "success" {
@@ -144,18 +166,22 @@ func checkPrometheusCommon(name, namespace string, fw portforward.PortForward) e
 		return true, nil
 	})
 	if err != nil {
+		klog.Error(err.Error())
 		return err
 	}
+	klog.Infof("prometheus[%s/%s] is up", namespace, name)
 
 	return wait.PollImmediate(5*time.Second, 5*time.Minute, func() (done bool, err error) {
 		prometheusTargets := fmt.Sprintf("http://%s/api/v1/targets", prometheusAddr)
 		targetResponse, err := http.Get(prometheusTargets)
 		if err != nil {
+			klog.Error(err.Error())
 			return false, nil
 		}
 		defer targetResponse.Body.Close()
 		body, err := ioutil.ReadAll(targetResponse.Body)
 		if err != nil {
+			klog.Error(err.Error())
 			return false, nil
 		}
 		data := struct {
@@ -171,9 +197,9 @@ func checkPrometheusCommon(name, namespace string, fw portforward.PortForward) e
 			} `json:"data"`
 		}{}
 		if err := json.Unmarshal(body, &data); err != nil {
+			klog.Error(err.Error())
 			return false, nil
 		}
-		klog.Infof("monitor[%s/%s]'s prometheus targets error", namespace, name)
 		if data.Status != "success" || len(data.Data.ActiveTargets) < 1 {
 			klog.Errorf("monitor[%s/%s]'s prometheus targets error", namespace, name)
 			return false, nil

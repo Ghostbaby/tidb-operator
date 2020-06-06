@@ -1,3 +1,131 @@
+# TiDB Operator v1.1.0 Release Notes
+
+This is the GA release of TiDB Operator 1.1, which focuses on the usability, extensibility and security.
+
+See our official [documentation site](https://pingcap.com/docs/tidb-in-kubernetes/stable/) for new features, guides, and instructions in production, etc.
+
+## Upgrade from v1.0.x
+
+For v1.0.x users, refer to [Upgrade TiDB Operator](https://pingcap.com/docs/tidb-in-kubernetes/stable/upgrade-tidb-operator/) to upgrade TiDB Operator in your cluster. Note that you should read the release notes (especially breaking changes and action required items) before the upgrade.
+
+## Breaking changes since v1.0.0
+
+- Change TiDB pod `readiness` probe from `HTTPGet` to `TCPSocket` 4000 port. This will trigger rolling-upgrade for the `tidb-server` component. You can set `spec.paused` to `true` before upgrading tidb-operator to avoid the rolling upgrade, and set it back to `false` when you are ready to upgrade your TiDB server ([#2139](https://github.com/pingcap/tidb-operator/pull/2139), [@weekface](https://github.com/weekface))
+- `--advertise-address` is configured for `tidb-server`, which would trigger rolling-upgrade for the TiDB server. You can set `spec.paused` to `true` before upgrading TiDB Operator to avoid the rolling upgrade, and set it back to `false` when you are ready to upgrade your TiDB server ([#2076](https://github.com/pingcap/tidb-operator/pull/2076), [@cofyc](https://github.com/cofyc))
+- `--default-storage-class-name` and `--default-backup-storage-class-name` flags are abandoned, and the storage class defaults to Kubernetes default storage class right now. If you have set default storage class different than Kubernetes default storage class, set them explicitly in your TiDB cluster Helm or YAML files. ([#1581](https://github.com/pingcap/tidb-operator/pull/1581), [@cofyc](https://github.com/cofyc))
+- Add the `timezone` support for [all charts](https://github.com/pingcap/tidb-operator/tree/master/charts) ([#1122](https://github.com/pingcap/tidb-operator/pull/1122), [@weekface](https://github.com/weekface)).
+
+  For the `tidb-cluster` chart, we already have the `timezone` option (`UTC` by default). If the user does not change it to a different value (for example, `Asia/Shanghai`), none of the Pods will be recreated.
+  If the user changes it to another value (for example, `Aisa/Shanghai`), all the related Pods (add a `TZ` env) will be recreated, namely rolling updated.
+
+  The related Pods include `pump`, `drainer`, `dicovery`, `monitor`, `scheduled backup`, `tidb-initializer`, and `tikv-importer`.
+
+  All images' time zone maintained by TiDB Operator is `UTC`. If you use your own images, you need to make sure that the time zone inside your images is `UTC`.
+
+## Other Notable changes
+
+- Fix `TidbCluster` upgrade bug when `PodWebhook` and `Advancend StatefulSet` are both enabled ([#2507](https://github.com/pingcap/tidb-operator/pull/2507), [@Yisaer](https://github.com/Yisaer))
+- Support preemption in `tidb-scheduler` ([#2510](https://github.com/pingcap/tidb-operator/pull/2510), [@cofyc](https://github.com/cofyc))
+- Update BR to v4.0.0-rc.2 to include the `auto_random` fix ([#2508](https://github.com/pingcap/tidb-operator/pull/2508), [@DanielZhangQD](https://github.com/DanielZhangQD))
+- Supports advanced statefulset for TiFlash ([#2469](https://github.com/pingcap/tidb-operator/pull/2469), [@DanielZhangQD](https://github.com/DanielZhangQD))
+- Sync Pump before TiDB ([#2515](https://github.com/pingcap/tidb-operator/pull/2515), [@DanielZhangQD](https://github.com/DanielZhangQD))
+- Improve performance by removing `TidbControl` lock ([#2489](https://github.com/pingcap/tidb-operator/pull/2489), [@weekface](https://github.com/weekface))
+- Support TiCDC in `TidbCluster` ([#2362](https://github.com/pingcap/tidb-operator/pull/2362), [@weekface](https://github.com/weekface))
+- Update TiDB/TiKV/PD configuration to 4.0.0 GA version ([#2571](https://github.com/pingcap/tidb-operator/pull/2571), [@Yisaer](https://github.com/Yisaer))
+- TiDB Operator will not do failover for PD pods which are not desired ([#2570](https://github.com/pingcap/tidb-operator/pull/2570), [@Yisaer](https://github.com/Yisaer))
+
+## Previous releases
+
+- [v1.1.0-rc.4](#tidb-operator-v110-rc4-release-notes)
+- [v1.1.0-rc.3](#tidb-operator-v110-rc3-release-notes)
+- [v1.1.0-rc.2](#tidb-operator-v110-rc2-release-notes)
+- [v1.1.0-rc.1](#tidb-operator-v110-rc1-release-notes)
+- [v1.1.0-beta.2](#tidb-operator-v110-beta2-release-notes)
+- [v1.1.0-beta.1](#tidb-operator-v110-beta1-release-notes)
+
+# TiDB Operator v1.1.0-rc.4 Release Notes
+
+This is the fourth release candidate of `v1.1.0`, which focuses on the usability, extensibility and security of TiDB Operator. While we encourage usage in non-critical environments, it is **NOT** recommended to use this version in critical environments.
+
+## Action Required
+
+- Separate TiDB client certificates can be used for each component. Users should migrate the old TLS configs of Backup and Restore to the new configs. Refer to [#2403](https://github.com/pingcap/tidb-operator/pull/2403) for more details ([#2403](https://github.com/pingcap/tidb-operator/pull/2403), [@weekface](https://github.com/weekface))
+
+## Other Notable Changes
+
+- Fix the bug that the service annotations would be exposed in `TidbCluster` specification ([#2471](https://github.com/pingcap/tidb-operator/pull/2471), [@Yisaer](https://github.com/Yisaer))
+- Fix a bug when reconciling TiDB service while the `healthCheckNodePort` is already generated by Kubernetes ([#2438](https://github.com/pingcap/tidb-operator/pull/2438), [@aylei](https://github.com/aylei))
+- Support `TidbMonitorRef` in `TidbCluster` Status ([#2424](https://github.com/pingcap/tidb-operator/pull/2424), [@Yisaer](https://github.com/Yisaer))
+- Support setting the backup path prefix for remote storage ([#2435](https://github.com/pingcap/tidb-operator/pull/2435), [@onlymellb](https://github.com/onlymellb))
+- Support customizing `mydumper` options in Backup CR ([#2407](https://github.com/pingcap/tidb-operator/pull/2407), [@onlymellb](https://github.com/onlymellb))
+- Support TiCDC in TidbCluster CR. ([#2338](https://github.com/pingcap/tidb-operator/pull/2338), [@weekface](https://github.com/weekface))
+- Update BR to `v3.1.1` in the `tidb-backup-manager` image ([#2425](https://github.com/pingcap/tidb-operator/pull/2425), [@DanielZhangQD](https://github.com/DanielZhangQD))
+- Support creating node pools for TiFlash and CDC on ACK ([#2420](https://github.com/pingcap/tidb-operator/pull/2420), [@DanielZhangQD](https://github.com/DanielZhangQD))
+- Support creating node pools for TiFlash and CDC on EKS ([#2413](https://github.com/pingcap/tidb-operator/pull/2413), [@DanielZhangQD](https://github.com/DanielZhangQD))
+- Expose `PVReclaimPolicy` for `TidbMonitor` when storage is enabled ([#2379](https://github.com/pingcap/tidb-operator/pull/2379), [@Yisaer](https://github.com/Yisaer))
+- Support arbitrary topology-based HA in tidb-scheduler (e.g. node zones) ([#2366](https://github.com/pingcap/tidb-operator/pull/2366), [@PengJi](https://github.com/PengJi))
+- Skip setting the TLS for PD dashboard when the TiDB version is earlier than 4.0.0 ([#2389](https://github.com/pingcap/tidb-operator/pull/2389), [@weekface](https://github.com/weekface))
+- Support backup and restore with GCS using BR ([#2267](https://github.com/pingcap/tidb-operator/pull/2267), [@shuijing198799](https://github.com/shuijing198799))
+- Update `TiDBConfig` and `TiKVConfig` to support the `4.0.0-rc` version ([#2322](https://github.com/pingcap/tidb-operator/pull/2322), [@Yisaer](https://github.com/Yisaer))
+- Fix the bug when `TidbCluster` service type is `NodePort`, the value of `NodePort` would change frequently ([#2284](https://github.com/pingcap/tidb-operator/pull/2284), [@Yisaer](https://github.com/Yisaer))
+- Add external strategy ability for `TidbClusterAutoScaler` ([#2279](https://github.com/pingcap/tidb-operator/pull/2279), [@Yisaer](https://github.com/Yisaer))
+- PVC will not be deleted when `TidbMonitor` gets deleted ([#2374](https://github.com/pingcap/tidb-operator/pull/2374), [@Yisaer](https://github.com/Yisaer))
+- Support scaling for TiFlash ([#2237](https://github.com/pingcap/tidb-operator/pull/2237), [@DanielZhangQD](https://github.com/DanielZhangQD))
+
+
+# TiDB Operator v1.1.0-rc.3 Release Notes
+
+This is the third release candidate of `v1.1.0`, which focuses on the usability, extensibility and security of TiDB Operator. While we encourage usage in non-critical environments, it is **NOT** recommended to use this version in critical environments.
+
+## Notable Changes
+
+- Skip auto-failover when pods are not scheduled and perform recovery operation no matter what state failover pods are in ([#2263](https://github.com/pingcap/tidb-operator/pull/2263), [@cofyc](https://github.com/cofyc))
+- Support `TiFlash` metrics in `TidbMonitor` ([#2341](https://github.com/pingcap/tidb-operator/pull/2341), [@Yisaer](https://github.com/Yisaer))
+- Do not print `rclone` config in the Pod logs ([#2343](https://github.com/pingcap/tidb-operator/pull/2343), [@DanielZhangQD](https://github.com/DanielZhangQD))
+- Using `Patch` in `periodicity` controller to avoid updating `StatefulSet` to the wrong state ([#2332](https://github.com/pingcap/tidb-operator/pull/2332), [@Yisaer](https://github.com/Yisaer))
+- Set `enable-placement-rules` to `true` for PD if TiFlash is enabled in the cluster ([#2328](https://github.com/pingcap/tidb-operator/pull/2328), [@DanielZhangQD](https://github.com/DanielZhangQD))
+- Support `rclone` options in the Backup and Restore CR ([#2318](https://github.com/pingcap/tidb-operator/pull/2318), [@DanielZhangQD](https://github.com/DanielZhangQD))
+- Fix the issue that statefulsets are updated during each sync even if no changes are made to the config ([#2308](https://github.com/pingcap/tidb-operator/pull/2308), [@DanielZhangQD](https://github.com/DanielZhangQD))
+- Support configuring `Ingress` in `TidbMonitor` ([#2314](https://github.com/pingcap/tidb-operator/pull/2314), [@Yisaer](https://github.com/Yisaer))
+- Fix a bug that auto-created failover pods can't be deleted when they are in the failed state ([#2300](https://github.com/pingcap/tidb-operator/pull/2300), [@cofyc](https://github.com/cofyc))
+- Add useful `Event` in `TidbCluster` during upgrading and scaling when `admissionWebhook.validation.pods` in operator configuration is enabled ([#2305](https://github.com/pingcap/tidb-operator/pull/2305), [@Yisaer](https://github.com/Yisaer))
+- Fix the issue that services are updated during each sync even if no changes are made to the service configuration ([#2299](https://github.com/pingcap/tidb-operator/pull/2299), [@DanielZhangQD](https://github.com/DanielZhangQD))
+- Fix a bug that would cause panic in statefulset webhook when the update strategy of `StatefulSet` is not `RollingUpdate` ([#2291](https://github.com/pingcap/tidb-operator/pull/2291), [@Yisaer](https://github.com/Yisaer))
+- Fix a panic in syncing `TidbClusterAutoScaler` status when the target `TidbCluster` does not exist ([#2289](https://github.com/pingcap/tidb-operator/pull/2289), [@Yisaer](https://github.com/Yisaer))
+- Fix the `pdapi` cache issue while the cluster TLS is enabled ([#2275](https://github.com/pingcap/tidb-operator/pull/2275), [@weekface](https://github.com/weekface))
+- Fix the config error in restore ([#2250](https://github.com/pingcap/tidb-operator/pull/2250), [@Yisaer](https://github.com/Yisaer))
+- Support failover for TiFlash ([#2249](https://github.com/pingcap/tidb-operator/pull/2249), [@DanielZhangQD](https://github.com/DanielZhangQD))
+- Update the default `eks` version in terraform scripts to 1.15 ([#2238](https://github.com/pingcap/tidb-operator/pull/2238), [@Yisaer](https://github.com/Yisaer))
+- Support upgrading for TiFlash ([#2246](https://github.com/pingcap/tidb-operator/pull/2246), [@DanielZhangQD](https://github.com/DanielZhangQD))
+- Add `stderr` logs from BR to the backup-manager logs ([#2213](https://github.com/pingcap/tidb-operator/pull/2213), [@DanielZhangQD](https://github.com/DanielZhangQD))
+- Add field `TiKVEncryptionConfig` in `TiKVConfig`, which defines how to encrypt data key and raw data in TiKV, and how to back up and restore the master key. See the description for details in `tikv_config.go` ([#2151](https://github.com/pingcap/tidb-operator/pull/2151), [@shuijing198799](https://github.com/shuijing198799))
+
+
+# TiDB Operator v1.1.0-rc.2 Release Notes
+
+This is the second release candidate of `v1.1.0`, which focuses on the usability, extensibility and security of TiDB Operator. While we encourage usage in non-critical environments, it is **NOT** recommended to use this version in critical environments.
+
+## Action Required
+
+- Change TiDB pod `readiness` probe from `HTTPGet` to `TCPSocket` 4000 port. This will trigger rolling-upgrade for the `tidb-server` component. You can set `spec.paused` to `true` before upgrading tidb-operator to avoid the rolling upgrade, and set it back to `false` when you are ready to upgrade your tidb server ([#2139](https://github.com/pingcap/tidb-operator/pull/2139), [@weekface](https://github.com/weekface))
+
+## Notable Changes
+
+- Add `status` field for `TidbAutoScaler` CR ([#2182](https://github.com/pingcap/tidb-operator/pull/2182), [@Yisaer](https://github.com/Yisaer))
+- Add `spec.pd.maxFailoverCount` field to limit max failover replicas for PD ([#2184](https://github.com/pingcap/tidb-operator/pull/2184), [@cofyc](https://github.com/cofyc))
+- Emit more events for `TidbCluster` and `TidbClusterAutoScaler` to help users know TiDB running status ([#2150](https://github.com/pingcap/tidb-operator/pull/2150), [@Yisaer](https://github.com/Yisaer))
+- Add the `AGE` column to show creation timestamp for all CRDs ([#2168](https://github.com/pingcap/tidb-operator/pull/2168), [@cofyc](https://github.com/cofyc))
+- Add a switch to skip PD Dashboard TLS configuration ([#2143](https://github.com/pingcap/tidb-operator/pull/2143), [@weekface](https://github.com/weekface))
+- Support deploying TiFlash with TidbCluster CR ([#2157](https://github.com/pingcap/tidb-operator/pull/2157), [@DanielZhangQD](https://github.com/DanielZhangQD))
+- Add TLS support for TiKV metrics API ([#2137](https://github.com/pingcap/tidb-operator/pull/2137), [@weekface](https://github.com/weekface))
+- Set PD DashboardConfig when TLS between the MySQL client and TiDB server is enabled ([#2085](https://github.com/pingcap/tidb-operator/pull/2085), [@weekface](https://github.com/weekface))
+- Remove unnecessary informer caches to reduce the memory footprint of tidb-controller-manager ([#1504](https://github.com/pingcap/tidb-operator/pull/1504), [@aylei](https://github.com/aylei))
+- Fix the failure that Helm cannot load the kubeconfig file when deleting the tidb-operator release during `terraform destroy` ([#2148](https://github.com/pingcap/tidb-operator/pull/2148), [@DanielZhangQD](https://github.com/DanielZhangQD))
+- Support configuring the Webhook TLS setting by loading a secret ([#2135](https://github.com/pingcap/tidb-operator/pull/2135), [@Yisaer](https://github.com/Yisaer))
+- Support TiFlash in TidbCluster CR ([#2122](https://github.com/pingcap/tidb-operator/pull/2122), [@DanielZhangQD](https://github.com/DanielZhangQD))
+- Fix the error that alertmanager couldn't be set in `TidbMonitor` ([#2108](https://github.com/pingcap/tidb-operator/pull/2108), [@Yisaer](https://github.com/Yisaer))
+
+
 # TiDB Operator v1.1.0-rc.1 Release Notes
 
 This is a release candidate of `v1.1.0`, which focuses on the usability, extensibility and security of TiDB Operator. While we encourage usage in non-critical environments, it is **NOT** recommended to use this version in critical environments.
@@ -6,6 +134,7 @@ This is a release candidate of `v1.1.0`, which focuses on the usability, extensi
 
 - `--advertise-address` will be configured for `tidb-server`, which would trigger rolling-upgrade for the `tidb-server` component. You can set `spec.paused` to `true` before upgrading tidb-operator to avoid the rolling upgrade, and set it back to `false` when you are ready to upgrade your tidb server ([#2076](https://github.com/pingcap/tidb-operator/pull/2076), [@cofyc](https://github.com/cofyc))
 - Add the `tlsClient.tlsSecret` field in the backup and restore spec, which supports specifying a secret name that includes the cert ([#2003](https://github.com/pingcap/tidb-operator/pull/2003), [@shuijing198799](https://github.com/shuijing198799))
+- Remove `spec.br.pd`, `spec.br.ca`, `spec.br.cert`, `spec.br.key` and add `spec.br.cluster`, `spec.br.clusterNamespace` for the `Backup`, `Restore` and `BackupSchedule` custom resources, which makes the BR configuration more reasonable ([#1836](https://github.com/pingcap/tidb-operator/pull/1836), [@shuijing198799](https://github.com/shuijing198799))
 
 
 ## Other Notable Changes
@@ -96,15 +225,15 @@ This is a pre-release of `v1.1.0`, which focuses on the usability, extensibility
 ### Action Required
 
 - ACTION REQUIRED: Add the `timezone` support for [all charts](https://github.com/pingcap/tidb-operator/tree/master/charts) ([#1122](https://github.com/pingcap/tidb-operator/pull/1122), [@weekface](https://github.com/weekface)).
-  
+
   For the `tidb-cluster` chart, we already have the `timezone` option (`UTC` by default). If the user does not change it to a different value (for example: `Aisa/Shanghai`), all Pods will not be recreated.
   If the user changes it to another value (for example: `Aisa/Shanghai`), all the related Pods (add a `TZ` env) will be recreated (rolling update).
-  
+
   Regarding other charts, we don't have a `timezone` option in their `values.yaml`. We add the `timezone` option in this PR. No matter whether the user uses the old `values.yaml` or the new `values.yaml`, all the related Pods (add a `TZ` env) will not be recreated (rolling update).
-  
+
   The related Pods include `pump`, `drainer`, `dicovery`, `monitor`, `scheduled backup`, `tidb-initializer`, and `tikv-importer`.
-  
-  All images' time zone maintained by `tidb-operator` is `UTC`. If you use your own images, you need to make sure that the time zone inside your images is `UTC`. 
+
+  All images' time zone maintained by `tidb-operator` is `UTC`. If you use your own images, you need to make sure that the time zone inside your images is `UTC`.
 
 ### Other Notable Changes
 

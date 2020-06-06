@@ -19,15 +19,20 @@ import (
 
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/autoscaler/autoscaler/calculate"
+	"github.com/pingcap/tidb-operator/pkg/autoscaler/autoscaler/query"
 	"github.com/pingcap/tidb-operator/pkg/label"
 	operatorUtils "github.com/pingcap/tidb-operator/pkg/util"
 	promClient "github.com/prometheus/client_golang/api"
 	appsv1 "k8s.io/api/apps/v1"
+	"k8s.io/klog"
 )
 
 func (am *autoScalerManager) syncTiDB(tc *v1alpha1.TidbCluster, tac *v1alpha1.TidbClusterAutoScaler) error {
 	if tac.Spec.TiDB == nil {
 		return nil
+	}
+	if tac.Status.TiDB == nil {
+		tac.Status.TiDB = &v1alpha1.TidbAutoScalerStatus{}
 	}
 	sts, err := am.stsLister.StatefulSets(tc.Namespace).Get(operatorUtils.GetStatefulSetName(tc, v1alpha1.TiDBMemberType))
 	if err != nil {
@@ -36,17 +41,25 @@ func (am *autoScalerManager) syncTiDB(tc *v1alpha1.TidbCluster, tac *v1alpha1.Ti
 	if !checkAutoScalingPrerequisites(tc, sts, v1alpha1.TiDBMemberType) {
 		return nil
 	}
-	currentReplicas := tc.Spec.TiDB.Replicas
-	instances := filterTidbInstances(tc)
-	targetReplicas, err := calculateTidbMetrics(tac, sts, instances)
-	if err != nil {
-		return err
+	var targetReplicas int32
+	if tac.Spec.TiDB.ExternalEndpoint == nil {
+		instances := filterTidbInstances(tc)
+		targetReplicas, err = calculateTidbMetrics(tac, sts, instances)
+		if err != nil {
+			return err
+		}
+	} else {
+		targetReplicas, err = query.ExternalService(tc, v1alpha1.TiDBMemberType, tac.Spec.TiDB.ExternalEndpoint, am.kubecli)
+		if err != nil {
+			klog.Errorf("tac[%s/%s] 's query to the external endpoint got error: %v", tac.Namespace, tac.Name, err)
+			return err
+		}
 	}
 	targetReplicas = limitTargetReplicas(targetReplicas, tac, v1alpha1.TiDBMemberType)
 	if targetReplicas == tc.Spec.TiDB.Replicas {
 		return nil
 	}
-	return syncTiDBAfterCalculated(tc, tac, currentReplicas, targetReplicas, sts)
+	return syncTiDBAfterCalculated(tc, tac, tc.Spec.TiDB.Replicas, targetReplicas, sts)
 }
 
 // syncTiDBAfterCalculated would check the Consecutive count to avoid jitter, and it would also check the interval
@@ -71,6 +84,7 @@ func syncTiDBAfterCalculated(tc *v1alpha1.TidbCluster, tac *v1alpha1.TidbCluster
 func updateTcTiDBIfScale(tc *v1alpha1.TidbCluster, tac *v1alpha1.TidbClusterAutoScaler, recommendedReplicas int32) error {
 	tac.Annotations[label.AnnTiDBLastAutoScalingTimestamp] = fmt.Sprintf("%d", time.Now().Unix())
 	tc.Spec.TiDB.Replicas = recommendedReplicas
+	tac.Status.TiDB.RecommendedReplicas = &recommendedReplicas
 	return nil
 }
 

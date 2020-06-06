@@ -15,18 +15,22 @@ package autoscaler
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/client/clientset/versioned"
 	informers "github.com/pingcap/tidb-operator/pkg/client/informers/externalversions"
 	v1alpha1listers "github.com/pingcap/tidb-operator/pkg/client/listers/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/controller"
+	"github.com/pingcap/tidb-operator/pkg/label"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	kubeinformers "k8s.io/client-go/informers"
+	"k8s.io/client-go/kubernetes"
 	appslisters "k8s.io/client-go/listers/apps/v1"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
@@ -34,6 +38,7 @@ import (
 )
 
 type autoScalerManager struct {
+	kubecli   kubernetes.Interface
 	cli       versioned.Interface
 	tcControl controller.TidbClusterControlInterface
 	taLister  v1alpha1listers.TidbClusterAutoScalerLister
@@ -42,6 +47,7 @@ type autoScalerManager struct {
 }
 
 func NewAutoScalerManager(
+	kubecli kubernetes.Interface,
 	cli versioned.Interface,
 	informerFactory informers.SharedInformerFactory,
 	kubeInformerFactory kubeinformers.SharedInformerFactory,
@@ -49,6 +55,7 @@ func NewAutoScalerManager(
 	tcLister := informerFactory.Pingcap().V1alpha1().TidbClusters().Lister()
 	stsLister := kubeInformerFactory.Apps().V1().StatefulSets().Lister()
 	return &autoScalerManager{
+		kubecli:   kubecli,
 		cli:       cli,
 		tcControl: controller.NewRealTidbClusterControl(cli, tcLister, recorder),
 		taLister:  informerFactory.Pingcap().V1alpha1().TidbClusterAutoScalers().Lister(),
@@ -85,7 +92,7 @@ func (am *autoScalerManager) Sync(tac *v1alpha1.TidbClusterAutoScaler) error {
 	if err := am.syncTidbClusterReplicas(tac, tc, oldTc); err != nil {
 		return err
 	}
-	return am.syncAutoScalingStatus(tc, oldTc, tac)
+	return am.updateAutoScaling(oldTc, tac)
 }
 
 func (am *autoScalerManager) syncAutoScaling(tc *v1alpha1.TidbCluster, tac *v1alpha1.TidbClusterAutoScaler) error {
@@ -125,9 +132,55 @@ func (am *autoScalerManager) syncTidbClusterReplicas(tac *v1alpha1.TidbClusterAu
 	return nil
 }
 
-//TODO: sync tac status
-func (am *autoScalerManager) syncAutoScalingStatus(tc *v1alpha1.TidbCluster, oldTc *v1alpha1.TidbCluster,
+func (am *autoScalerManager) updateAutoScaling(oldTc *v1alpha1.TidbCluster,
 	tac *v1alpha1.TidbClusterAutoScaler) error {
+	if tac.Annotations == nil {
+		tac.Annotations = map[string]string{}
+	}
+	f := func(key string) (*time.Time, error) {
+		v, ok := tac.Annotations[key]
+		if ok {
+			ts, err := strconv.ParseInt(v, 10, 64)
+			if err != nil {
+				klog.Errorf("failed to convert label[%s] key to int64, err:%v", key, err)
+				return nil, err
+			}
+			t := time.Unix(ts, 0)
+			return &t, nil
+		}
+		return nil, nil
+	}
+
+	tac.Annotations[label.AnnLastSyncingTimestamp] = fmt.Sprintf("%d", time.Now().Unix())
+
+	if tac.Spec.TiKV != nil {
+		if oldTc.Status.TiKV.StatefulSet != nil {
+			tac.Status.TiKV.CurrentReplicas = oldTc.Status.TiKV.StatefulSet.CurrentReplicas
+		}
+		lastTimestamp, err := f(label.AnnTiKVLastAutoScalingTimestamp)
+		if err != nil {
+			return err
+		}
+		if lastTimestamp != nil {
+			tac.Status.TiKV.LastAutoScalingTimestamp = &metav1.Time{Time: *lastTimestamp}
+		}
+	} else {
+		tac.Status.TiKV = nil
+	}
+	if tac.Spec.TiDB != nil {
+		if oldTc.Status.TiDB.StatefulSet != nil {
+			tac.Status.TiDB.CurrentReplicas = oldTc.Status.TiDB.StatefulSet.CurrentReplicas
+		}
+		lastTimestamp, err := f(label.AnnTiDBLastAutoScalingTimestamp)
+		if err != nil {
+			return err
+		}
+		if lastTimestamp != nil {
+			tac.Status.TiDB.LastAutoScalingTimestamp = &metav1.Time{Time: *lastTimestamp}
+		}
+	} else {
+		tac.Status.TiDB = nil
+	}
 	return am.updateTidbClusterAutoScaler(tac)
 }
 

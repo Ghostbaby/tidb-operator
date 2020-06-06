@@ -17,18 +17,23 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/pingcap/advanced-statefulset/pkg/apis/apps/v1/helper"
+	"github.com/pingcap/advanced-statefulset/client/apis/apps/v1/helper"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/autoscaler/autoscaler/calculate"
+	"github.com/pingcap/tidb-operator/pkg/autoscaler/autoscaler/query"
 	"github.com/pingcap/tidb-operator/pkg/label"
 	operatorUtils "github.com/pingcap/tidb-operator/pkg/util"
 	promClient "github.com/prometheus/client_golang/api"
 	appsv1 "k8s.io/api/apps/v1"
+	"k8s.io/klog"
 )
 
 func (am *autoScalerManager) syncTiKV(tc *v1alpha1.TidbCluster, tac *v1alpha1.TidbClusterAutoScaler) error {
 	if tac.Spec.TiKV == nil {
 		return nil
+	}
+	if tac.Status.TiKV == nil {
+		tac.Status.TiKV = &v1alpha1.TikvAutoScalerStatus{}
 	}
 	sts, err := am.stsLister.StatefulSets(tc.Namespace).Get(operatorUtils.GetStatefulSetName(tc, v1alpha1.TiKVMemberType))
 	if err != nil {
@@ -38,15 +43,24 @@ func (am *autoScalerManager) syncTiKV(tc *v1alpha1.TidbCluster, tac *v1alpha1.Ti
 		return nil
 	}
 	instances := filterTiKVInstances(tc)
-	currentReplicas := int32(len(instances))
-	targetReplicas, err := calculateTikvMetrics(tac, sts, instances)
-	if err != nil {
-		return err
+	var targetReplicas int32
+	if tac.Spec.TiKV.ExternalEndpoint == nil {
+		targetReplicas, err = calculateTikvMetrics(tac, sts, instances)
+		if err != nil {
+			return err
+		}
+	} else {
+		targetReplicas, err = query.ExternalService(tc, v1alpha1.TiKVMemberType, tac.Spec.TiKV.ExternalEndpoint, am.kubecli)
+		if err != nil {
+			klog.Errorf("tac[%s/%s] 's query to the external endpoint got error: %v", tac.Namespace, tac.Name, err)
+			return err
+		}
 	}
 	targetReplicas = limitTargetReplicas(targetReplicas, tac, v1alpha1.TiKVMemberType)
 	if targetReplicas == tc.Spec.TiKV.Replicas {
 		return nil
 	}
+	currentReplicas := int32(len(instances))
 	return syncTiKVAfterCalculated(tc, tac, currentReplicas, targetReplicas, sts)
 }
 
@@ -56,12 +70,24 @@ func (am *autoScalerManager) syncTiKV(tc *v1alpha1.TidbCluster, tac *v1alpha1.Ti
 // The currentReplicas of TiKV calculated in auto-scaling is the count of the StateUp TiKV instance, so we need to
 // add the number of other state tikv instance replicas when we update the TidbCluster.Spec.TiKV.Replicas
 func syncTiKVAfterCalculated(tc *v1alpha1.TidbCluster, tac *v1alpha1.TidbClusterAutoScaler, currentReplicas, recommendedReplicas int32, sts *appsv1.StatefulSet) error {
-
 	intervalSeconds := tac.Spec.TiKV.ScaleInIntervalSeconds
-	if recommendedReplicas > tc.Spec.TiKV.Replicas {
-		intervalSeconds = tac.Spec.TiKV.ScaleOutIntervalSeconds
+	if recommendedReplicas > currentReplicas {
+		if tac.Status.TiKV.Phase != v1alpha1.ReadyToScaleOutAutoScalerPhase {
+			tac.Status.TiKV.Phase = v1alpha1.ReadyToScaleOutAutoScalerPhase
+			// phase could change from Normal to ReadyToScaleOut, ReadyToScaleIn to ReadyToScaleOut,
+			// reset timestamp in both cases.
+			tac.Annotations[label.AnnTiKVReadyToScaleTimestamp] = fmt.Sprintf("%d", time.Now().Unix())
+		}
+	} else {
+		if tac.Status.TiKV.Phase != v1alpha1.ReadyToScaleInAutoScalerPhase {
+			tac.Status.TiKV.Phase = v1alpha1.ReadyToScaleInAutoScalerPhase
+			// phase could change from Normal to ReadyToScaleIn, ReadyToScaleOut to ReadyToScaleIn,
+			// reset timestamp in both cases.
+			tac.Annotations[label.AnnTiKVReadyToScaleTimestamp] = fmt.Sprintf("%d", time.Now().Unix())
+		}
 	}
-	ableToScale, err := checkStsAutoScalingInterval(tac, *intervalSeconds, v1alpha1.TiKVMemberType)
+
+	ableToScale, err := checkStsAutoScaling(tac, *tac.Spec.TiKV.ReadyToScaleThresholdSeconds, *intervalSeconds, v1alpha1.TiKVMemberType)
 	if err != nil {
 		return err
 	}
@@ -84,7 +110,6 @@ func filterTiKVInstances(tc *v1alpha1.TidbCluster) []string {
 
 // we record the auto-scaling out slot for tikv, in order to add special hot labels when they are created
 func updateTcTiKVIfScale(tc *v1alpha1.TidbCluster, tac *v1alpha1.TidbClusterAutoScaler, currentReplicas, recommendedReplicas int32, sts *appsv1.StatefulSet) error {
-	tac.Annotations[label.AnnTiKVLastAutoScalingTimestamp] = fmt.Sprintf("%d", time.Now().Unix())
 	if recommendedReplicas > currentReplicas {
 		newlyScaleOutOrdinalSets := helper.GetPodOrdinals(recommendedReplicas, sts).Difference(helper.GetPodOrdinals(currentReplicas, sts))
 		if newlyScaleOutOrdinalSets.Len() > 0 {
@@ -99,7 +124,10 @@ func updateTcTiKVIfScale(tc *v1alpha1.TidbCluster, tac *v1alpha1.TidbClusterAuto
 			tc.Annotations[label.AnnTiKVAutoScalingOutOrdinals] = v
 		}
 	}
+	tac.Status.TiKV.Phase = v1alpha1.NormalAutoScalerPhase
+	tac.Annotations[label.AnnTiKVLastAutoScalingTimestamp] = fmt.Sprintf("%d", time.Now().Unix())
 	tc.Spec.TiKV.Replicas = recommendedReplicas
+	tac.Status.TiKV.RecommendedReplicas = &recommendedReplicas
 	return nil
 }
 

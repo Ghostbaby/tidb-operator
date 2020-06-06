@@ -252,9 +252,19 @@ func TiFlashMemberName(clusterName string) string {
 	return fmt.Sprintf("%s-tiflash", clusterName)
 }
 
+// TiCDCMemberName returns ticdc member name
+func TiCDCMemberName(clusterName string) string {
+	return fmt.Sprintf("%s-ticdc", clusterName)
+}
+
 // TiFlashPeerMemberName returns tiflash peer service name
 func TiFlashPeerMemberName(clusterName string) string {
 	return fmt.Sprintf("%s-tiflash-peer", clusterName)
+}
+
+// TiCDCPeerMemberName returns ticdc peer service name
+func TiCDCPeerMemberName(clusterName string) string {
+	return fmt.Sprintf("%s-ticdc-peer", clusterName)
 }
 
 // TiDBMemberName returns tidb member name
@@ -294,6 +304,15 @@ func AnnProm(port int32) map[string]string {
 		"prometheus.io/scrape": "true",
 		"prometheus.io/path":   "/metrics",
 		"prometheus.io/port":   fmt.Sprintf("%d", port),
+	}
+}
+
+// AnnAdditionalProm adds additional prometheus scarping configuration annotation for the pod
+// which has multiple metrics endpoint
+// we assumes that the metrics path is as same as the previous metrics path
+func AnnAdditionalProm(name string, port int32) map[string]string {
+	return map[string]string{
+		fmt.Sprintf("%s.prometheus.io/port", name): fmt.Sprintf("%d", port),
 	}
 }
 

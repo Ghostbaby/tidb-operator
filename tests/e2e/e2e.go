@@ -28,7 +28,7 @@ import (
 	"github.com/onsi/ginkgo/config"
 	"github.com/onsi/ginkgo/reporters"
 	"github.com/onsi/gomega"
-	asclientset "github.com/pingcap/advanced-statefulset/pkg/client/clientset/versioned"
+	asclientset "github.com/pingcap/advanced-statefulset/client/client/clientset/versioned"
 	"github.com/pingcap/tidb-operator/pkg/client/clientset/versioned"
 	"github.com/pingcap/tidb-operator/pkg/version"
 	"github.com/pingcap/tidb-operator/tests"
@@ -145,8 +145,9 @@ func setupSuite() {
 	// which be used and we must clean them later.
 	// We set local-storage class as default for simplicity.
 	// The default storage class of kind is local-path-provisioner which
-	// consumes local storage like local-volume-provisioner.
-	if framework.TestContext.Provider == "gke" || framework.TestContext.Provider == "aws" {
+	// consumes local storage like local-volume-provisioner. However, it's not
+	// stable in our e2e testing.
+	if framework.TestContext.Provider == "gke" || framework.TestContext.Provider == "aws" || framework.TestContext.Provider == "kind" {
 		defaultSCName := "local-storage"
 		list, err := c.StorageV1().StorageClasses().List(metav1.ListOptions{})
 		framework.ExpectNoError(err)
@@ -204,6 +205,11 @@ var _ = ginkgo.SynchronizedBeforeSuite(func() []byte {
 	if err := exec.Command("sh", "-c", clearValidatingWebhookConfigurationsCmd).Run(); err != nil {
 		framework.Failf("failed to clear validatingwebhookconfigurations (cmd: %q, error: %v", clearValidatingWebhookConfigurationsCmd, err)
 	}
+	ginkgo.By("Clear tidb-operator mutatingwebhookconfigurations")
+	clearMutatingWebhookConfigurationsCmd := "kubectl delete mutatingwebhookconfiguration -l app.kubernetes.io/name=tidb-operator"
+	if err := exec.Command("sh", "-c", clearMutatingWebhookConfigurationsCmd).Run(); err != nil {
+		framework.Failf("failed to clear mutatingwebhookconfigurations (cmd: %q, error: %v", clearMutatingWebhookConfigurationsCmd, err)
+	}
 	setupSuite()
 	// override with hard-coded value
 	e2econfig.TestConfig.ManifestDir = "/manifests"
@@ -218,6 +224,8 @@ var _ = ginkgo.SynchronizedBeforeSuite(func() []byte {
 	}
 	// Get clients
 	config, err := framework.LoadConfig()
+	config.QPS = 20
+	config.Burst = 50
 	framework.ExpectNoError(err, "failed to load config")
 	cli, err := versioned.NewForConfig(config)
 	framework.ExpectNoError(err, "failed to create clientset")
@@ -261,6 +269,7 @@ var _ = ginkgo.SynchronizedBeforeSuite(func() []byte {
 		return true, nil
 	})
 	framework.ExpectNoError(err, "failed to wait for all PVs to be available")
+
 	ginkgo.By("Labeling nodes")
 	oa := tests.NewOperatorActions(cli, kubeCli, asCli, aggrCli, apiExtCli, tests.DefaultPollInterval, nil, e2econfig.TestConfig, nil, nil, nil)
 	oa.LabelNodesOrDie()

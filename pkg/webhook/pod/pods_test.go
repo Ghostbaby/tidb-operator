@@ -14,9 +14,8 @@
 package pod
 
 import (
+	"strconv"
 	"testing"
-
-	"k8s.io/client-go/kubernetes"
 
 	. "github.com/onsi/gomega"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
@@ -28,7 +27,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
 	kubefake "k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/pointer"
 )
 
@@ -130,15 +131,17 @@ func newAdmissionRequest() *admission.AdmissionRequest {
 func newPodAdmissionControl(kubeCli kubernetes.Interface) *PodAdmissionControl {
 	operatorCli := operatorClifake.NewSimpleClientset()
 	pdControl := pdapi.NewFakePDControl(kubeCli)
+	recorder := record.NewFakeRecorder(10)
 	return &PodAdmissionControl{
 		kubeCli:     kubeCli,
 		operatorCli: operatorCli,
 		pdControl:   pdControl,
+		recorder:    recorder,
 	}
 }
 
-func newTidbClusterForPodAdmissionControl() *v1alpha1.TidbCluster {
-	return &v1alpha1.TidbCluster{
+func newTidbClusterForPodAdmissionControl(pdReplicas int32, tikvReplicas int32) *v1alpha1.TidbCluster {
+	tc := &v1alpha1.TidbCluster{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "TidbCluster",
 			APIVersion: "pingcap.com/v1alpha1",
@@ -169,26 +172,29 @@ func newTidbClusterForPodAdmissionControl() *v1alpha1.TidbCluster {
 			TiKV: v1alpha1.TiKVStatus{
 				Synced: true,
 				Phase:  v1alpha1.NormalPhase,
-				Stores: map[string]v1alpha1.TiKVStore{
-					"0": {
-						PodName:     memberUtils.TikvPodName(tcName, 0),
-						LeaderCount: 1,
-						State:       v1alpha1.TiKVStateUp,
-					},
-					"1": {
-						PodName:     memberUtils.TikvPodName(tcName, 1),
-						LeaderCount: 1,
-						State:       v1alpha1.TiKVStateUp,
-					},
-					"2": {
-						PodName:     memberUtils.TikvPodName(tcName, 2),
-						LeaderCount: 1,
-						State:       v1alpha1.TiKVStateUp,
-					},
-				},
+				Stores: map[string]v1alpha1.TiKVStore{},
+			},
+			PD: v1alpha1.PDStatus{
+				Synced:  true,
+				Phase:   v1alpha1.NormalPhase,
+				Members: map[string]v1alpha1.PDMember{},
 			},
 		},
 	}
+	for i := 0; int32(i) < tikvReplicas; i++ {
+		tc.Status.TiKV.Stores[strconv.Itoa(i)] = v1alpha1.TiKVStore{
+			PodName:     memberUtils.TikvPodName(tcName, int32(i)),
+			LeaderCount: 1,
+			State:       v1alpha1.TiKVStateUp,
+		}
+	}
+	for i := 0; int32(i) < pdReplicas; i++ {
+		tc.Status.PD.Members[memberUtils.PdPodName(tcName, int32(i))] = v1alpha1.PDMember{
+			Health: true,
+			Name:   memberUtils.PdPodName(tcName, int32(i)),
+		}
+	}
+	return tc
 }
 
 func newNormalPod() *corev1.Pod {
